@@ -1,0 +1,11 @@
+MODULE    = wmp.dll
+IMPORTS   = oleaut32 ole32 user32 gdi32
+
+C_SRCS = \
+	events.c \
+	oleobj.c \
+	player.c \
+	wmp_main.c
+
+RC_SRCS = rsrc.rc
+IDL_SRCS = wmp_typelib.idl
