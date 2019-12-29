@@ -1200,8 +1200,7 @@ static void update_wineprefix( BOOL force )
 
         if ((process = start_rundll32( inf_path, FALSE )))
         {
-            /* HACK: Disable the wait window as it is deemed confusing */
-            HWND hwnd = 1 ? NULL : show_wait_window();
+            HWND hwnd = show_wait_window();
             for (;;)
             {
                 MSG msg;
