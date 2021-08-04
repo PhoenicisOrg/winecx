@@ -819,6 +819,29 @@ static inline const char* debugstr_version(const struct assembly_version *ver)
     return wine_dbg_sprintf("%u.%u.%u.%u", ver->major, ver->minor, ver->build, ver->revision);
 }
 
+static NTSTATUS get_module_filename( HMODULE module, UNICODE_STRING *str, unsigned int extra_len )
+{
+    NTSTATUS status;
+    ULONG_PTR magic;
+    LDR_MODULE *pldr;
+
+    LdrLockLoaderLock(0, NULL, &magic);
+    status = LdrFindEntryForAddress( module, &pldr );
+    if (status == STATUS_SUCCESS)
+    {
+        if ((str->Buffer = RtlAllocateHeap( GetProcessHeap(), 0,
+                                            pldr->FullDllName.Length + extra_len + sizeof(WCHAR) )))
+        {
+            memcpy( str->Buffer, pldr->FullDllName.Buffer, pldr->FullDllName.Length + sizeof(WCHAR) );
+            str->Length = pldr->FullDllName.Length;
+            str->MaximumLength = pldr->FullDllName.Length + extra_len + sizeof(WCHAR);
+        }
+        else status = STATUS_NO_MEMORY;
+    }
+    LdrUnlockLoaderLock(0, magic);
+    return status;
+}
+
 static struct assembly *add_assembly(ACTIVATION_CONTEXT *actctx, enum assembly_type at)
 {
     struct assembly *assembly;
@@ -2791,7 +2814,7 @@ static NTSTATUS parse_manifest_buffer( struct actctx_loader* acl, struct assembl
 }
 
 static NTSTATUS parse_manifest( struct actctx_loader* acl, struct assembly_identity* ai,
-                                LPCWSTR filename, LPCWSTR directory, BOOL shared,
+                                LPCWSTR filename, HANDLE module, LPCWSTR directory, BOOL shared,
                                 const void *buffer, SIZE_T size )
 {
     xmlbuf_t xmlbuf;
@@ -2807,7 +2830,14 @@ static NTSTATUS parse_manifest( struct actctx_loader* acl, struct assembly_ident
     if (directory && !(assembly->directory = strdupW(directory)))
         return STATUS_NO_MEMORY;
 
-    if (filename) assembly->manifest.info = strdupW( filename + 4 /* skip \??\ prefix */ );
+    if (!filename)
+    {
+        UNICODE_STRING module_path;
+        if ((status = get_module_filename( module, &module_path, 0 ))) return status;
+        assembly->manifest.info = module_path.Buffer;
+    }
+    else if(!(assembly->manifest.info = strdupW( filename + 4 /* skip \??\ prefix */ ))) return STATUS_NO_MEMORY;
+
     assembly->manifest.type = assembly->manifest.info ? ACTIVATION_CONTEXT_PATH_TYPE_WIN32_FILE
                                                       : ACTIVATION_CONTEXT_PATH_TYPE_NONE;
 
@@ -2835,20 +2865,15 @@ static NTSTATUS parse_manifest( struct actctx_loader* acl, struct assembly_ident
     }
     else
     {
-        /* let's assume utf-8 for now */
-        int len = wine_utf8_mbstowcs( 0, buffer, size, NULL, 0 );
+        DWORD len;
         WCHAR *new_buff;
 
-        if (len == -1)
-        {
-            FIXME( "utf-8 conversion failed\n" );
-            return STATUS_SXS_CANT_GEN_ACTCTX;
-        }
-        if (!(new_buff = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
-            return STATUS_NO_MEMORY;
-        wine_utf8_mbstowcs( 0, buffer, size, new_buff, len );
+        /* let's assume utf-8 for now */
+        RtlUTF8ToUnicodeN( NULL, 0, &len, buffer, size );
+        if (!(new_buff = RtlAllocateHeap( GetProcessHeap(), 0, len ))) return STATUS_NO_MEMORY;
+        RtlUTF8ToUnicodeN( new_buff, len, &len, buffer, size );
         xmlbuf.ptr = new_buff;
-        xmlbuf.end = xmlbuf.ptr + len;
+        xmlbuf.end = xmlbuf.ptr + len / sizeof(WCHAR);
         status = parse_manifest_buffer( acl, assembly, ai, &xmlbuf );
         RtlFreeHeap( GetProcessHeap(), 0, new_buff );
     }
@@ -2867,29 +2892,6 @@ static NTSTATUS open_nt_file( HANDLE *handle, UNICODE_STRING *name )
     attr.SecurityDescriptor = NULL;
     attr.SecurityQualityOfService = NULL;
     return NtOpenFile( handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_ALERT );
-}
-
-static NTSTATUS get_module_filename( HMODULE module, UNICODE_STRING *str, unsigned int extra_len )
-{
-    NTSTATUS status;
-    ULONG_PTR magic;
-    LDR_MODULE *pldr;
-
-    LdrLockLoaderLock(0, NULL, &magic);
-    status = LdrFindEntryForAddress( module, &pldr );
-    if (status == STATUS_SUCCESS)
-    {
-        if ((str->Buffer = RtlAllocateHeap( GetProcessHeap(), 0,
-                                            pldr->FullDllName.Length + extra_len + sizeof(WCHAR) )))
-        {
-            memcpy( str->Buffer, pldr->FullDllName.Buffer, pldr->FullDllName.Length + sizeof(WCHAR) );
-            str->Length = pldr->FullDllName.Length;
-            str->MaximumLength = pldr->FullDllName.Length + extra_len + sizeof(WCHAR);
-        }
-        else status = STATUS_NO_MEMORY;
-    }
-    LdrUnlockLoaderLock(0, magic);
-    return status;
 }
 
 static NTSTATUS get_manifest_in_module( struct actctx_loader* acl, struct assembly_identity* ai,
@@ -2943,7 +2945,7 @@ static NTSTATUS get_manifest_in_module( struct actctx_loader* acl, struct assemb
     if (status == STATUS_SUCCESS) status = LdrAccessResource(hModule, entry, &ptr, NULL);
 
     if (status == STATUS_SUCCESS)
-        status = parse_manifest(acl, ai, filename, directory, shared, ptr, entry->Size);
+        status = parse_manifest(acl, ai, filename, hModule, directory, shared, ptr, entry->Size);
 
     return status;
 }
@@ -3030,7 +3032,7 @@ static NTSTATUS get_manifest_in_manifest_file( struct actctx_loader* acl, struct
 
     status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileEndOfFileInformation );
     if (status == STATUS_SUCCESS)
-        status = parse_manifest(acl, ai, filename, directory, shared, base, info.EndOfFile.QuadPart);
+        status = parse_manifest(acl, ai, filename, NULL, directory, shared, base, info.EndOfFile.QuadPart);
 
     NtUnmapViewOfSection( GetCurrentProcess(), base );
     return status;
@@ -5570,7 +5572,7 @@ NTSTATUS WINAPI RtlQueryActivationContextApplicationSettings( DWORD flags, HANDL
                                                               const WCHAR *settings, WCHAR *buffer,
                                                               SIZE_T size, SIZE_T *written )
 {
-    ACTIVATION_CONTEXT *actctx = check_actctx( handle );
+    ACTIVATION_CONTEXT *actctx;
     const WCHAR *res;
 
     if (flags)

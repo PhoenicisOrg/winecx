@@ -289,8 +289,7 @@ static DWORD_PTR send_end_session_messages( struct window_info *win, UINT count,
     /* Check whether the app quit on its own */
     ret = WaitForSingleObject( process_handle, 0 );
     CloseHandle( process_handle );
-    /* CODEWEAVERS HACK: avoid killing winewrapper, other processes will be killed in kill_processes */
-    if (0 && ret == WAIT_TIMEOUT)
+    if (ret == WAIT_TIMEOUT)
     {
         /* If not, it returned from all WM_ENDSESSION and is finished cleaning
          * up, so we can safely kill the process. */
@@ -389,14 +388,10 @@ void kill_processes( BOOL kill_desktop )
         process.dwSize = sizeof(process);
         for (res = Process32FirstW( snapshot, &process ); res; res = Process32NextW( snapshot, &process ))
         {
-            static const WCHAR winewrapperW[] = {'w','i','n','e','w','r','a','p','p','e','r',0};
             if (process.th32ProcessID == GetCurrentProcessId()) continue;
             if (process.th32ProcessID == desktop_pid) continue;
-            /* CODEWEAVERS HACK: don't kill winewrapper so end-of-installation
-             * detection works properly */
-            if (wcsstr( process.szExeFile, winewrapperW )) continue;
             WINE_TRACE("killing process %04x %s\n",
-                       process.th32ProcessID, wine_dbgstr_w(process.szExeFile) );
+                       process.th32ProcessID, wine_dbgstr_w(processesss.szExeFile) );
             if (!(handle = OpenProcess( PROCESS_TERMINATE, FALSE, process.th32ProcessID )))
                 continue;
             if (TerminateProcess( handle, 0 )) killed++;

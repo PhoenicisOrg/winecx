@@ -126,7 +126,7 @@ typedef struct ldap
     ULONG ld_refhoplimit;
     ULONG ld_options;
 #ifdef __i386_on_x86_64__
-    struct LDAP *ld_ld64;
+    LDAP *ld_ld64;
 #endif
 } WLDAP32_LDAP, *WLDAP32_PLDAP;
 
