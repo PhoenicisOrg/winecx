@@ -170,7 +170,7 @@ case $host in
       export PKG_CONFIG_PATH
       enable_win16=${enable_win16:-yes}
       with_unwind=${with_unwind:-no}
-    elif test "x$enable_win64" != "xyes" -a "x$enable_win32on64" = "xyes" -a "$cross_compiling" != "yes"
+    elif test "x$enable_win64" != "xyes" -a "x$enable_win32on64" = "xyes"
     then
       if test "x${GCC}" = "xyes"
       then
