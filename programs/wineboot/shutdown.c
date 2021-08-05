@@ -390,8 +390,8 @@ void kill_processes( BOOL kill_desktop )
         {
             if (process.th32ProcessID == GetCurrentProcessId()) continue;
             if (process.th32ProcessID == desktop_pid) continue;
-            WINE_TRACE("killing process %04x %s\n",
-                       process.th32ProcessID, wine_dbgstr_w(processesss.szExeFile) );
+            WINE_TRACE("killing process %04x\n",
+                       process.th32ProcessID);
             if (!(handle = OpenProcess( PROCESS_TERMINATE, FALSE, process.th32ProcessID )))
                 continue;
             if (TerminateProcess( handle, 0 )) killed++;
