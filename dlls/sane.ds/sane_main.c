@@ -26,13 +26,30 @@
 
 #include "sane_i.h"
 #include "wine/debug.h"
-#include "wine/library.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twain);
+
+struct tagActiveDS activeDS;
 
 DSMENTRYPROC SANE_dsmentry;
 
 #ifdef SONAME_LIBSANE
+#define MAKE_FUNCPTR(f) typeof(f) * p##f;
+MAKE_FUNCPTR(sane_init)
+MAKE_FUNCPTR(sane_exit)
+MAKE_FUNCPTR(sane_get_devices)
+MAKE_FUNCPTR(sane_open)
+MAKE_FUNCPTR(sane_close)
+MAKE_FUNCPTR(sane_get_option_descriptor)
+MAKE_FUNCPTR(sane_control_option)
+MAKE_FUNCPTR(sane_get_parameters)
+MAKE_FUNCPTR(sane_start)
+MAKE_FUNCPTR(sane_read)
+MAKE_FUNCPTR(sane_cancel)
+MAKE_FUNCPTR(sane_set_io_mode)
+MAKE_FUNCPTR(sane_get_select_fd)
+MAKE_FUNCPTR(sane_strstatus)
+#undef MAKE_FUNCPTR
 
 HINSTANCE SANE_instance;
 
@@ -41,22 +58,22 @@ static void *libsane_handle;
 static void close_libsane(void *h)
 {
     if (h)
-        wine_dlclose(h, NULL, 0);
+        dlclose(h);
 }
 
 static void *open_libsane(void)
 {
     void *h;
 
-    h = wine_dlopen(SONAME_LIBSANE, RTLD_GLOBAL | RTLD_NOW, NULL, 0);
+    h = dlopen(SONAME_LIBSANE, RTLD_GLOBAL | RTLD_NOW);
     if (!h)
     {
-        WARN("dlopen(%s) failed\n", SONAME_LIBSANE);
+        WARN("failed to load %s; %s\n", SONAME_LIBSANE, dlerror());
         return NULL;
     }
 
 #define LOAD_FUNCPTR(f) \
-    if((p##f = wine_dlsym(h, #f, NULL, 0)) == NULL) { \
+    if((p##f = dlsym(h, #f)) == NULL) { \
         close_libsane(h); \
         ERR("Could not dlsym %s\n", #f); \
         return NULL; \

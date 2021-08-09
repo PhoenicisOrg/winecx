@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <unistd.h>
 #ifdef HAVE_SYS_IOCTL_H
 # include <sys/ioctl.h>
 #endif
@@ -148,9 +149,10 @@ static void appeared_callback( DADiskRef disk, void * HOSTPTR context )
     if ((ref = CFDictionaryGetValue( dict, CFSTR("DAMediaRemovable") )) && CFBooleanGetValue( ref ))
         add_dos_device( -1, device, device, mount_point, type, guid_ptr, &devname );
     else
-        if (guid_ptr) add_volume( device, device, mount_point, DEVICE_HARDDISK_VOL, guid_ptr );
+        if (guid_ptr) add_volume( device, device, mount_point, DEVICE_HARDDISK_VOL, guid_ptr, NULL );
 
-    if ((fd = open( device, O_RDONLY )) >= 0)
+    if (!access( device, R_OK ) &&
+        (fd = open( device, O_RDONLY )) >= 0)
     {
         dk_scsi_identify_t dsi;
 

@@ -51,6 +51,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(mshtml);
 HINSTANCE hInst;
 DWORD mshtml_tls = TLS_OUT_OF_INDEXES;
 
+void (__cdecl *ccp_init)(ExternalCycleCollectionParticipant*,const CCObjCallback*);
+nsrefcnt (__cdecl *ccref_decr)(nsCycleCollectingAutoRefCnt*,nsISupports*,ExternalCycleCollectionParticipant*);
+nsrefcnt (__cdecl *ccref_incr)(nsCycleCollectingAutoRefCnt*,nsISupports*);
+void (__cdecl *ccref_init)(nsCycleCollectingAutoRefCnt*,nsrefcnt);
+void (__cdecl *describe_cc_node)(nsCycleCollectingAutoRefCnt*,const char*,nsCycleCollectionTraversalCallback*);
+void (__cdecl *note_cc_edge)(nsISupports*,const char*,nsCycleCollectionTraversalCallback*);
+
 static HINSTANCE shdoclc = NULL;
 static WCHAR *status_strings[IDS_STATUS_LAST-IDS_STATUS_FIRST+1];
 static IMultiLanguage2 *mlang;
@@ -142,10 +149,8 @@ static BOOL read_compat_mode(HKEY key, compat_mode_t *r)
     DWORD type, size;
     LSTATUS status;
 
-    static const WCHAR max_compat_modeW[] = {'M','a','x','C','o','m','p','a','t','M','o','d','e',0};
-
     size = sizeof(version);
-    status = RegQueryValueExW(key, max_compat_modeW, NULL, &type, (BYTE*)version, &size);
+    status = RegQueryValueExW(key, L"MaxCompatMode", NULL, &type, (BYTE*)version, &size);
     if(status != ERROR_SUCCESS || type != REG_SZ)
         return FALSE;
 
@@ -161,14 +166,8 @@ static BOOL WINAPI load_compat_settings(INIT_ONCE *once, void *param, void **con
     HKEY key, host_key;
     DWORD res;
 
-    static const WCHAR key_nameW[] = {
-        'S','o','f','t','w','a','r','e',
-        '\\','W','i','n','e',
-        '\\','M','S','H','T','M','L',
-        '\\','C','o','m','p','a','t','M','o','d','e',0};
-
     /* @@ Wine registry key: HKCU\Software\Wine\MSHTML\CompatMode */
-    res = RegOpenKeyW(HKEY_CURRENT_USER, key_nameW, &key);
+    res = RegOpenKeyW(HKEY_CURRENT_USER, L"Software\\Wine\\MSHTML\\CompatMode", &key);
     if(res != ERROR_SUCCESS)
         return TRUE;
 
@@ -343,13 +342,10 @@ HRESULT do_query_service(IUnknown *unk, REFGUID guid_service, REFIID riid, void 
 
 HINSTANCE get_shdoclc(void)
 {
-    static const WCHAR wszShdoclc[] =
-        {'s','h','d','o','c','l','c','.','d','l','l',0};
-
     if(shdoclc)
         return shdoclc;
 
-    return shdoclc = LoadLibraryExW(wszShdoclc, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    return shdoclc = LoadLibraryExW(L"shdoclc.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
 }
 
 BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID reserved)
@@ -528,9 +524,15 @@ DWORD WINAPI RNIGetCompatibleVersion(void)
 /***********************************************************************
  *          DllInstall (MSHTML.@)
  */
-HRESULT WINAPI DllInstall(BOOL bInstall, LPCWSTR cmdline)
+HRESULT WINAPI DllInstall(BOOL install, const WCHAR *cmdline)
 {
-    FIXME("stub %d %s: returning S_OK\n", bInstall, debugstr_w(cmdline));
+    TRACE("(%x %s)\n", install, debugstr_w(cmdline));
+
+    if(cmdline && *cmdline)
+        FIXME("unsupported cmdline: %s\n", debugstr_w(cmdline));
+    else if(install)
+        load_gecko();
+
     return S_OK;
 }
 
@@ -595,8 +597,6 @@ static HRESULT register_server(BOOL do_register)
     static CLSID const *clsids[35];
     unsigned int i = 0;
 
-    static const WCHAR wszAdvpack[] = {'a','d','v','p','a','c','k','.','d','l','l',0};
-
     TRACE("(%x)\n", do_register);
 
     INF_SET_CLSID(AboutProtocol);
@@ -646,7 +646,7 @@ static HRESULT register_server(BOOL do_register)
     strtable.cEntries = ARRAY_SIZE(pse);
     strtable.pse = pse;
 
-    hAdvpack = LoadLibraryW(wszAdvpack);
+    hAdvpack = LoadLibraryW(L"advpack.dll");
     pRegInstall = (void *)GetProcAddress(hAdvpack, "RegInstall");
 
     hres = pRegInstall(hInst, do_register ? "RegisterDll" : "UnregisterDll", &strtable);
@@ -675,9 +675,6 @@ HRESULT WINAPI DllRegisterServer(void)
     hres = __wine_register_resources( hInst );
     if(SUCCEEDED(hres))
         hres = register_server(TRUE);
-    if(SUCCEEDED(hres))
-        load_gecko();
-
     return hres;
 }
 

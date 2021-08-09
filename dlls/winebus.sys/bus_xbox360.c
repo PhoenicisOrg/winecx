@@ -104,8 +104,6 @@ static CFRunLoopRef run_loop;
 static HANDLE run_loop_handle;
 
 static const WCHAR busidW[] = {'X','B','O','X',0};
-#include "initguid.h"
-DEFINE_GUID(DEVCLASS, 0x2381EBD6,0x852A,0x464D,0x95,0x2D,0xF8,0x4D,0x08,0x35,0xDE,0xBA);
 
 struct platform_private {
     io_object_t object;
@@ -131,15 +129,14 @@ static const unsigned char ReportDescriptor[] = {
     0x09, 0x3f,                    //     USAGE (Reserved)
     0x09, 0x3b,                    //     USAGE (Byte Count)
     0x81, 0x01,                    //     INPUT (Cnst,Ary,Abs)
-    0x75, 0x01,                    //     REPORT_SIZE (1)
-    0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
-    0x25, 0x01,                    //     LOGICAL_MAXIMUM (1)
+    0x05, 0x01,                    //     USAGE_PAGE (Generic Desktop)
+    0x09, 0x39,                    //     USAGE (Hatswitch)
+    0x15, 0x01,                    //     LOGICAL_MINIMUM (1)
+    0x25, 0x08,                    //     LOGICAL_MAXIMUM (0x08)
     0x35, 0x00,                    //     PHYSICAL_MINIMUM (0)
-    0x45, 0x01,                    //     PHYSICAL_MAXIMUM (1)
-    0x95, 0x04,                    //     REPORT_COUNT (4)
-    0x05, 0x09,                    //     USAGE_PAGE (Button)
-    0x19, 0x0c,                    //     USAGE_MINIMUM (Button 12)
-    0x29, 0x0f,                    //     USAGE_MAXIMUM (Button 15)
+    0x45, 0x08,                    //     PHYSICAL_MAXIMUM (8)
+    0x75, 0x04,                    //     REPORT_SIZE (4)
+    0x95, 0x01,                    //     REPORT_COUNT (1)
     0x81, 0x02,                    //     INPUT (Data,Var,Abs)
     0x75, 0x01,                    //     REPORT_SIZE (1)
     0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
@@ -148,10 +145,10 @@ static const unsigned char ReportDescriptor[] = {
     0x45, 0x01,                    //     PHYSICAL_MAXIMUM (1)
     0x95, 0x04,                    //     REPORT_COUNT (4)
     0x05, 0x09,                    //     USAGE_PAGE (Button)
+    0x09, 0x08,                    //     USAGE (Button 8)
+    0x09, 0x07,                    //     USAGE (Button 7)
     0x09, 0x09,                    //     USAGE (Button 9)
     0x09, 0x0a,                    //     USAGE (Button 10)
-    0x09, 0x07,                    //     USAGE (Button 7)
-    0x09, 0x08,                    //     USAGE (Button 8)
     0x81, 0x02,                    //     INPUT (Data,Var,Abs)
     0x75, 0x01,                    //     REPORT_SIZE (1)
     0x15, 0x00,                    //     LOGICAL_MINIMUM (0)
@@ -321,6 +318,8 @@ static void ReadCompletion(void * HOSTPTR refCon, IOReturn result, void * HOSTPT
     struct platform_private *private = (struct platform_private *)get_platform_private(device);
     UInt32 numBytesRead;
     IN_REPORT *report = (IN_REPORT*)private->buffer;
+    int hatswitch;
+
     /* Invert Y axis */
     if (report->hat_left_y < -32767)
         report->hat_left_y = 32767;
@@ -331,6 +330,25 @@ static void ReadCompletion(void * HOSTPTR refCon, IOReturn result, void * HOSTPT
     else
         report->hat_right_y = -1*report->hat_right_y;
 
+    /* Convert D-pad button bitmask to hat switch:
+     * 8 1 2
+     * 7 0 3
+     * 6 5 4
+     */
+    switch (report->buttons & 0xF)
+    {
+        case 0x1: hatswitch = 1; break;
+        case 0x2: hatswitch = 5; break;
+        case 0x4: hatswitch = 7; break;
+        case 0x5: hatswitch = 8; break;
+        case 0x6: hatswitch = 6; break;
+        case 0x8: hatswitch = 3; break;
+        case 0x9: hatswitch = 2; break;
+        case 0xA: hatswitch = 4; break;
+        default:  hatswitch = 0; break;
+    }
+    report->buttons &= 0xFFF0;
+    report->buttons |= hatswitch;
 
     process_hid_report(device, (BYTE*)report, FIELD_OFFSET(IN_REPORT, reserved));
 
@@ -578,7 +596,7 @@ static void process_IOService_Device(io_object_t object)
 
     if (is_xbox_gamepad(vid,pid))
     {
-        device = bus_create_hid_device(busidW, vid, pid, -1, 1, uid, serial_string,
+        device = bus_create_hid_device(busidW, vid, pid, 0, 1, uid, serial_string,
                                        1, &xbox_vtbl, sizeof(struct platform_private));
     }
     else
@@ -606,7 +624,7 @@ static void process_IOService_Device(io_object_t object)
             (*dev)->Release(dev);
         }
         else
-            IoInvalidateDeviceRelations(device, BusRelations);
+            IoInvalidateDeviceRelations(bus_pdo, BusRelations);
     }
 }
 
@@ -631,6 +649,7 @@ static void handle_IOServiceTerminatedCallback(void * HOSTPTR refcon, io_iterato
         if (device)
         {
             cleanupDevice(device);
+            bus_unlink_hid_device(device);
             bus_remove_hid_device(device);
         }
         IOObjectRelease(object);
