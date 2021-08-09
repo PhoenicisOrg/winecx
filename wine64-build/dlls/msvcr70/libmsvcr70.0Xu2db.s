@@ -1,8 +1,0 @@
-	.text
-
-	.align 3
-	
-	.globl __mbsnicmp
-	.private_extern __mbsnicmp
-__mbsnicmp:
-	.quad ___wine$func$msvcr70$370$_mbsnicmp
