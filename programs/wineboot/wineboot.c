@@ -1481,6 +1481,7 @@ static void update_wineprefix( BOOL force )
 
         if ((process = start_rundll32( inf_path, FALSE )))
         {
+            HWND hwnd = show_wait_window();
             for (;;)
             {
                 MSG msg;
