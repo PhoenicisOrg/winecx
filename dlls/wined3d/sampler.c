@@ -17,9 +17,6 @@
  *
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "wined3d_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
@@ -35,7 +32,7 @@ ULONG CDECL wined3d_sampler_incref(struct wined3d_sampler *sampler)
 
 ULONG CDECL wined3d_sampler_decref(struct wined3d_sampler *sampler)
 {
-    ULONG refcount = InterlockedDecrement(&sampler->refcount);
+    ULONG refcount = wined3d_atomic_decrement_mutex_lock(&sampler->refcount);
 
     TRACE("%p decreasing refcount to %u.\n", sampler, refcount);
 
@@ -43,6 +40,7 @@ ULONG CDECL wined3d_sampler_decref(struct wined3d_sampler *sampler)
     {
         sampler->parent_ops->wined3d_object_destroyed(sampler->parent);
         sampler->device->adapter->adapter_ops->adapter_destroy_sampler(sampler);
+        wined3d_mutex_unlock();
     }
 
     return refcount;

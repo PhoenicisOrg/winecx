@@ -16,9 +16,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "wined3d_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d_shader);
@@ -308,6 +305,7 @@ enum wined3d_sm4_opcode
     WINED3D_SM5_OP_IMM_ATOMIC_UMIN                  = 0xbd,
     WINED3D_SM5_OP_SYNC                             = 0xbe,
     WINED3D_SM5_OP_EVAL_SAMPLE_INDEX                = 0xcc,
+    WINED3D_SM5_OP_EVAL_CENTROID                    = 0xcd,
     WINED3D_SM5_OP_DCL_GS_INSTANCES                 = 0xce,
 };
 
@@ -1127,6 +1125,7 @@ static const struct wined3d_sm4_opcode_info opcode_table[] =
     {WINED3D_SM5_OP_SYNC,                             WINED3DSIH_SYNC,                             "",     "",
             shader_sm5_read_sync},
     {WINED3D_SM5_OP_EVAL_SAMPLE_INDEX,                WINED3DSIH_EVAL_SAMPLE_INDEX,                "f",    "fi"},
+    {WINED3D_SM5_OP_EVAL_CENTROID,                    WINED3DSIH_EVAL_CENTROID,                    "f",    "f"},
     {WINED3D_SM5_OP_DCL_GS_INSTANCES,                 WINED3DSIH_DCL_GS_INSTANCES,                 "",     "",
             shader_sm4_read_declaration_count},
 };
@@ -1321,6 +1320,9 @@ static void *shader_sm4_init(const DWORD *byte_code, size_t byte_code_size,
     {
         struct wined3d_shader_signature_element *e = &output_signature->elements[i];
 
+        if (priv->shader_version.type == WINED3D_SHADER_TYPE_PIXEL
+                && stricmp(e->semantic_name, "SV_TARGET"))
+            continue;
         if (e->register_idx >= ARRAY_SIZE(priv->output_map))
         {
             WARN("Invalid output index %u.\n", e->register_idx);
@@ -1461,6 +1463,7 @@ static BOOL shader_sm4_read_param(struct wined3d_sm4_data *priv, const DWORD **p
 
             default:
                 FIXME("Skipping modifier 0x%08x.\n", m);
+            case 0x01:
                 *modifier = WINED3DSPSM_NONE;
                 break;
         }
@@ -1820,10 +1823,13 @@ const struct wined3d_shader_frontend sm4_shader_frontend =
 
 #define TAG_AON9 WINEMAKEFOURCC('A', 'o', 'n', '9')
 #define TAG_DXBC WINEMAKEFOURCC('D', 'X', 'B', 'C')
+#define TAG_ISG1 WINEMAKEFOURCC('I', 'S', 'G', '1')
 #define TAG_ISGN WINEMAKEFOURCC('I', 'S', 'G', 'N')
+#define TAG_OSG1 WINEMAKEFOURCC('O', 'S', 'G', '1')
 #define TAG_OSG5 WINEMAKEFOURCC('O', 'S', 'G', '5')
 #define TAG_OSGN WINEMAKEFOURCC('O', 'S', 'G', 'N')
 #define TAG_PCSG WINEMAKEFOURCC('P', 'C', 'S', 'G')
+#define TAG_PSG1 WINEMAKEFOURCC('P', 'S', 'G', '1')
 #define TAG_SHDR WINEMAKEFOURCC('S', 'H', 'D', 'R')
 #define TAG_SHEX WINEMAKEFOURCC('S', 'H', 'E', 'X')
 
@@ -1955,6 +1961,7 @@ static HRESULT shader_parse_signature(DWORD tag, const char *data, DWORD data_si
         struct wined3d_shader_signature *s)
 {
     struct wined3d_shader_signature_element *e;
+    bool has_stream_index, has_min_precision;
     const char *ptr = data;
     unsigned int i;
     DWORD count;
@@ -1982,11 +1989,14 @@ static HRESULT shader_parse_signature(DWORD tag, const char *data, DWORD data_si
         return E_OUTOFMEMORY;
     }
 
+    has_min_precision = tag == TAG_OSG1 || tag == TAG_PSG1 || tag == TAG_ISG1;
+    has_stream_index = tag == TAG_OSG5 || has_min_precision;
+
     for (i = 0; i < count; ++i)
     {
         DWORD name_offset;
 
-        if (tag == TAG_OSG5)
+        if (has_stream_index)
             read_dword(&ptr, &e[i].stream_idx);
         else
             e[i].stream_idx = 0;
@@ -2003,10 +2013,15 @@ static HRESULT shader_parse_signature(DWORD tag, const char *data, DWORD data_si
         read_dword(&ptr, &e[i].register_idx);
         read_dword(&ptr, &e[i].mask);
 
+        if (has_min_precision)
+            read_dword(&ptr, &e[i].min_precision);
+        else
+            e[i].min_precision = 0;
+
         TRACE("Stream: %u, semantic: %s, semantic idx: %u, sysval_semantic %#x, "
-                "type %u, register idx: %u, use_mask %#x, input_mask %#x.\n",
+                "type %u, register idx: %u, use_mask %#x, input_mask %#x, min_precision %u.\n",
                 e[i].stream_idx, debugstr_a(e[i].semantic_name), e[i].semantic_idx, e[i].sysval_semantic,
-                e[i].component_type, e[i].register_idx, (e[i].mask >> 8) & 0xff, e[i].mask & 0xff);
+                e[i].component_type, e[i].register_idx, (e[i].mask >> 8) & 0xff, e[i].mask & 0xff, e[i].min_precision);
     }
 
     s->elements = e;
@@ -2024,6 +2039,7 @@ static HRESULT shader_dxbc_chunk_handler(const char *data, DWORD data_size, DWOR
     switch (tag)
     {
         case TAG_ISGN:
+        case TAG_ISG1:
             if (ctx->max_version < 4)
             {
                 TRACE("Skipping shader input signature.\n");
@@ -2039,6 +2055,7 @@ static HRESULT shader_dxbc_chunk_handler(const char *data, DWORD data_size, DWOR
             break;
 
         case TAG_OSGN:
+        case TAG_OSG1:
         case TAG_OSG5:
             if (ctx->max_version < 4)
             {
@@ -2055,6 +2072,7 @@ static HRESULT shader_dxbc_chunk_handler(const char *data, DWORD data_size, DWOR
             break;
 
         case TAG_PCSG:
+        case TAG_PSG1:
             if (shader->patch_constant_signature.elements)
             {
                 FIXME("Multiple patch constant signatures.\n");

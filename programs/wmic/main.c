@@ -44,7 +44,10 @@ alias_map[] =
     { L"LogicalDisk", L"Win32_LogicalDisk" },
     { L"nic", L"Win32_NetworkAdapter" },
     { L"os", L"Win32_OperatingSystem" },
-    { L"process", L"Win32_Process" }
+    { L"process", L"Win32_Process" },
+    { L"baseboard", L"Win32_BaseBoard" },
+    { L"diskdrive", L"Win32_DiskDrive" },
+    { L"memorychip", L"Win32_PhysicalMemory" }
 };
 
 static const WCHAR *find_class( const WCHAR *alias )
@@ -56,15 +59,6 @@ static const WCHAR *find_class( const WCHAR *alias )
         if (!wcsicmp( alias, alias_map[i].alias )) return alias_map[i].class;
     }
     return NULL;
-}
-
-static inline WCHAR *strdupW( const WCHAR *src )
-{
-    WCHAR *dst;
-    if (!src) return NULL;
-    if (!(dst = HeapAlloc( GetProcessHeap(), 0, (lstrlenW( src ) + 1) * sizeof(WCHAR) ))) return NULL;
-    lstrcpyW( dst, src );
-    return dst;
 }
 
 static WCHAR *find_prop( IWbemClassObject *class, const WCHAR *prop )
@@ -82,7 +76,7 @@ static WCHAR *find_prop( IWbemClassObject *class, const WCHAR *prop )
         SafeArrayGetElement( sa, &i, &str );
         if (!wcsicmp( str, prop ))
         {
-            ret = strdupW( str );
+            ret = wcsdup( str );
             break;
         }
     }
@@ -92,14 +86,14 @@ static WCHAR *find_prop( IWbemClassObject *class, const WCHAR *prop )
 
 static int WINAPIV output_string( HANDLE handle, const WCHAR *msg, ... )
 {
-    __ms_va_list va_args;
+    va_list va_args;
     int len;
     DWORD count;
     WCHAR buffer[8192];
 
-    __ms_va_start( va_args, msg );
+    va_start( va_args, msg );
     len = vswprintf( buffer, ARRAY_SIZE(buffer), msg, va_args );
-    __ms_va_end( va_args );
+    va_end( va_args );
 
     if (!WriteConsoleW( handle, buffer, len, &count, NULL ))
         WriteFile( handle, buffer, len * sizeof(WCHAR), &count, FALSE );
@@ -225,7 +219,7 @@ done:
     SysFreeString( path );
     SysFreeString( query );
     SysFreeString( wql );
-    HeapFree( GetProcessHeap(), 0, prop );
+    free( prop );
     CoUninitialize();
     return ret;
 }

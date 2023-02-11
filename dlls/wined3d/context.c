@@ -24,9 +24,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "wined3d_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
@@ -267,20 +264,19 @@ void context_update_stream_info(struct wined3d_context *context, const struct wi
     const struct wined3d_d3d_info *d3d_info = context->d3d_info;
     DWORD prev_all_vbo = stream_info->all_vbo;
     unsigned int i;
-    WORD map;
+    uint32_t map;
 
     wined3d_stream_info_from_declaration(stream_info, state, d3d_info);
 
     stream_info->all_vbo = 1;
-    for (i = 0, map = stream_info->use_map; map; map >>= 1, ++i)
+    map = stream_info->use_map;
+    while (map)
     {
         struct wined3d_stream_info_element *element;
         struct wined3d_bo_address data;
         struct wined3d_buffer *buffer;
 
-        if (!(map & 1))
-            continue;
-
+        i = wined3d_bit_scan(&map);
         element = &stream_info->elements[i];
         buffer = state->streams[element->stream_idx].buffer;
 
@@ -304,7 +300,7 @@ void context_update_stream_info(struct wined3d_context *context, const struct wi
         else
         {
             wined3d_buffer_load(buffer, context, state);
-            wined3d_buffer_get_memory(buffer, &data, buffer->locations);
+            wined3d_buffer_get_memory(buffer, context, &data);
             element->data.buffer_object = data.buffer_object;
             element->data.addr += (ULONG_PTR)data.addr;
         }
@@ -335,6 +331,23 @@ void context_update_stream_info(struct wined3d_context *context, const struct wi
     }
 }
 
+static bool is_resource_rtv_bound(const struct wined3d_state *state,
+        const struct wined3d_resource *resource)
+{
+    unsigned int i;
+
+    if (!resource->rtv_bind_count_device)
+        return false;
+
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets); ++i)
+    {
+        if (state->fb.render_targets[i] && state->fb.render_targets[i]->resource == resource)
+            return true;
+    }
+
+    return false;
+}
+
 /* Context activation is done by the caller. */
 static void context_preload_texture(struct wined3d_context *context,
         const struct wined3d_state *state, unsigned int idx)
@@ -344,7 +357,7 @@ static void context_preload_texture(struct wined3d_context *context,
     if (!(texture = state->textures[idx]))
         return;
 
-    if ((texture->resource.rtv_full_bind_count_device + texture->resource.rtv_partial_bind_count_device)
+    if (is_resource_rtv_bound(state, &texture->resource)
             || (state->fb.depth_stencil && state->fb.depth_stencil->resource == &texture->resource))
         context->uses_fbo_attached_resources = 1;
 
@@ -375,12 +388,12 @@ void context_preload_textures(struct wined3d_context *context, const struct wine
     }
     else
     {
-        WORD ffu_map = context->fixed_function_usage_map;
+        uint32_t ffu_map = context->fixed_function_usage_map;
 
-        for (i = 0; ffu_map; ffu_map >>= 1, ++i)
+        while (ffu_map)
         {
-            if (ffu_map & 1)
-                context_preload_texture(context, state, i);
+            i = wined3d_bit_scan(&ffu_map);
+            context_preload_texture(context, state, i);
         }
     }
 }

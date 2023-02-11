@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <math.h>
+#include <stdbool.h>
 #define COBJMACROS
 #define NONAMELESSSTRUCT
 #define NONAMELESSUNION
@@ -97,6 +98,7 @@ struct ddraw
     struct wined3d_adapter *wined3d_adapter;
     struct wined3d_output *wined3d_output;
     struct wined3d_device *wined3d_device;
+    struct wined3d_device_context *immediate_context;
     DWORD flags;
     LONG device_state;
 
@@ -329,6 +331,7 @@ struct d3d_device
 
     IUnknown *outer_unknown;
     struct wined3d_device *wined3d_device;
+    struct wined3d_device_context *immediate_context;
     struct ddraw *ddraw;
     IUnknown *rt_iface;
 
@@ -599,6 +602,7 @@ struct d3d_vertex_buffer
     DWORD                fvf;
     DWORD                size;
     BOOL                 dynamic;
+    bool discarded;
 };
 
 HRESULT d3d_vertex_buffer_create(struct d3d_vertex_buffer **buffer, struct ddraw *ddraw,
@@ -671,7 +675,7 @@ static inline struct wined3d_texture *ddraw_surface_get_default_texture(struct d
     {
         if (flags & DDRAW_SURFACE_READ && !(surface->texture_location & DDRAW_SURFACE_LOCATION_DEFAULT))
         {
-            wined3d_device_copy_sub_resource_region(surface->ddraw->wined3d_device,
+            wined3d_device_context_copy_sub_resource_region(surface->ddraw->immediate_context,
                     wined3d_texture_get_resource(surface->wined3d_texture), surface->sub_resource_idx, 0, 0, 0,
                     wined3d_texture_get_resource(surface->draw_texture), surface->sub_resource_idx, NULL, 0);
             surface->texture_location |= DDRAW_SURFACE_LOCATION_DEFAULT;
@@ -690,7 +694,7 @@ static inline struct wined3d_texture *ddraw_surface_get_draw_texture(struct ddra
 
     if (flags & DDRAW_SURFACE_READ && !(surface->texture_location & DDRAW_SURFACE_LOCATION_DRAW))
     {
-        wined3d_device_copy_sub_resource_region(surface->ddraw->wined3d_device,
+        wined3d_device_context_copy_sub_resource_region(surface->ddraw->immediate_context,
                 wined3d_texture_get_resource(surface->draw_texture), surface->sub_resource_idx, 0, 0, 0,
                 wined3d_texture_get_resource(surface->wined3d_texture), surface->sub_resource_idx, NULL, 0);
         surface->texture_location |= DDRAW_SURFACE_LOCATION_DRAW;

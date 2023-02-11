@@ -1,8 +1,8 @@
 MODULE    = dcomp.dll
 
-EXTRADLLFLAGS = -mno-cygwin
+EXTRADLLFLAGS = -Wb,--prefer-native
 
 C_SRCS = \
-	main.c
+	device.c
 
 RC_SRCS = version.rc

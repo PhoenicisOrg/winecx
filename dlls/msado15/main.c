@@ -22,6 +22,7 @@
 #define COBJMACROS
 #include "objbase.h"
 #include "rpcproxy.h"
+#include "msdasc.h"
 #include "msado15_backcompat.h"
 
 #include "wine/debug.h"
@@ -30,20 +31,6 @@
 #include "msado15_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(msado15);
-
-static HINSTANCE hinstance;
-
-BOOL WINAPI DllMain( HINSTANCE dll, DWORD reason, LPVOID reserved )
-{
-    switch (reason)
-    {
-    case DLL_PROCESS_ATTACH:
-        hinstance = dll;
-        DisableThreadLibraryCalls( dll );
-        break;
-    }
-    return TRUE;
-}
 
 typedef HRESULT (*fnCreateInstance)( void **obj );
 
@@ -150,26 +137,60 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID iid, void **obj )
     return IClassFactory_QueryInterface( cf, iid, obj );
 }
 
-/******************************************************************
- *          DllCanUnloadNow
- */
-HRESULT WINAPI DllCanUnloadNow(void)
+static ITypeLib *typelib;
+static ITypeInfo *typeinfos[LAST_tid];
+
+static REFIID tid_ids[] = {
+    &IID_ADORecordsetConstruction,
+    &IID__Command,
+    &IID__Connection,
+    &IID_Field,
+    &IID_Fields,
+    &IID_Properties,
+    &IID__Recordset,
+    &IID__Stream,
+};
+
+static HRESULT load_typelib(void)
 {
-    return S_FALSE;
+    HRESULT hres;
+    ITypeLib *tl;
+
+    if(typelib)
+        return S_OK;
+
+    hres = LoadRegTypeLib(&LIBID_ADODB, 1, 0, LOCALE_SYSTEM_DEFAULT, &tl);
+    if(FAILED(hres)) {
+        ERR("LoadRegTypeLib failed: %08lx\n", hres);
+        return hres;
+    }
+
+    if(InterlockedCompareExchangePointer((void**)&typelib, tl, NULL))
+        ITypeLib_Release(tl);
+    return hres;
 }
 
-/***********************************************************************
- *          DllRegisterServer
- */
-HRESULT WINAPI DllRegisterServer( void )
+HRESULT get_typeinfo(tid_t tid, ITypeInfo **typeinfo)
 {
-    return __wine_register_resources( hinstance );
-}
+    HRESULT hres;
 
-/***********************************************************************
- *          DllUnregisterServer
- */
-HRESULT WINAPI DllUnregisterServer( void )
-{
-    return __wine_unregister_resources( hinstance );
+    if (FAILED(hres = load_typelib()))
+        return hres;
+
+    if(!typeinfos[tid]) {
+        ITypeInfo *ti;
+
+        hres = ITypeLib_GetTypeInfoOfGuid(typelib, tid_ids[tid], &ti);
+        if(FAILED(hres)) {
+            ERR("GetTypeInfoOfGuid(%s) failed: %08lx\n", debugstr_guid(tid_ids[tid]), hres);
+            return hres;
+        }
+
+        if(InterlockedCompareExchangePointer((void**)(typeinfos+tid), ti, NULL))
+            ITypeInfo_Release(ti);
+    }
+
+    *typeinfo = typeinfos[tid];
+    ITypeInfo_AddRef(*typeinfo);
+    return S_OK;
 }

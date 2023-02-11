@@ -100,12 +100,14 @@ static BYTE (__cdecl *p_short_eq)(const void*, const void*);
 static char* (__cdecl *p_Copy_s)(char*, size_t, const char*, size_t);
 
 static unsigned short (__cdecl *p_wctype)(const char*);
-static MSVCP__Ctypevec* (__cdecl *p__Getctype)(MSVCP__Ctypevec*);
-static /*MSVCP__Collvec*/ULONGLONG (__cdecl *p__Getcoll)(void);
+static MSVCP__Ctypevec (__cdecl *p__Getctype)(void);
+static MSVCP__Collvec (__cdecl *p__Getcoll)(void);
 static wctrans_t (__cdecl *p_wctrans)(const char*);
 static wint_t (__cdecl *p_towctrans)(wint_t, wctrans_t);
 static void (__cdecl *p_locale__Locimp__Locimp_Addfac)(locale__Locimp*,locale_facet*,size_t);
 static size_t (__cdecl *p__Strxfrm)(char*, char*, const char*, const char*, const MSVCP__Collvec*);
+static size_t (__cdecl *p__Wcsxfrm)(wchar_t*, wchar_t*, const wchar_t*,
+        const wchar_t*, const MSVCP__Collvec*);
 
 #undef __thiscall
 #ifdef __i386__
@@ -165,7 +167,7 @@ static void __cdecl test_invalid_parameter_handler(const wchar_t *expression,
     ok(function == NULL, "function is not NULL\n");
     ok(file == NULL, "file is not NULL\n");
     ok(line == 0, "line = %u\n", line);
-    ok(arg == 0, "arg = %lx\n", (UINT_PTR)arg);
+    ok(arg == 0, "arg = %Ix\n", arg);
     invalid_parameter++;
 }
 
@@ -250,6 +252,7 @@ static BOOL init(void)
     SET(p_wctrans, "wctrans");
     SET(p_towctrans, "towctrans");
     SET(p__Strxfrm, "_Strxfrm");
+    SET(p__Wcsxfrm, "_Wcsxfrm");
     SET(basic_ostringstream_char_vbtable, "??_8?$basic_ostringstream@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@7B@");
 
     SET(p_std_Ctraits_float__Isnan, "?_Isnan@?$_Ctraits@M@std@@SA_NM@Z");
@@ -581,8 +584,8 @@ static void test__Getctype(void)
     MSVCP__Ctypevec ret;
     _locale_t locale;
 
-    ok(p__Getctype(&ret) == &ret, "__Getctype returned incorrect pointer\n");
-    ok(ret.handle == 0, "ret.handle = %d\n", ret.handle);
+    ret = p__Getctype();
+    ok(ret.handle == 0, "ret.handle = %ld\n", ret.handle);
     ok(ret.page == 0, "ret.page = %d\n", ret.page);
     ok(ret.delfl == 1, "ret.delfl = %d\n", ret.delfl);
     ok(ret.table[0] == 32, "ret.table[0] = %d\n", ret.table[0]);
@@ -591,8 +594,8 @@ static void test__Getctype(void)
     locale = p__get_current_locale();
     locale->locinfo->lc_handle[LC_COLLATE] = 0x1234567;
     p__free_locale(locale);
-    ok(p__Getctype(&ret) == &ret, "__Getctype returned incorrect pointer\n");
-    ok(ret.handle == 0x1234567, "ret.handle = %d\n", ret.handle);
+    ret = p__Getctype();
+    ok(ret.handle == 0x1234567, "ret.handle = %ld\n", ret.handle);
     ok(ret.page == 0, "ret.page = %d\n", ret.page);
     ok(ret.delfl == 1, "ret.delfl = %d\n", ret.delfl);
     ok(ret.table[0] == 32, "ret.table[0] = %d\n", ret.table[0]);
@@ -601,26 +604,23 @@ static void test__Getctype(void)
 
 static void test__Getcoll(void)
 {
-    ULONGLONG (__cdecl *p__Getcoll_arg)(MSVCP__Collvec*);
+#ifdef __i386__
+    /* Workaround a gcc bug */
+    ULONGLONG tmp;
+#define call__Getcoll(ret) tmp = ((ULONGLONG (__cdecl*)(void))p__Getcoll)(); \
+    memcpy(&ret, &tmp, sizeof(tmp))
+#else
+#define call__Getcoll(ret) ret = p__Getcoll()
+#endif
     _locale_t locale;
-
-    union {
-        MSVCP__Collvec collvec;
-        ULONGLONG ull;
-    }ret;
+    MSVCP__Collvec ret;
 
     locale = p__get_current_locale();
     locale->locinfo->lc_handle[LC_COLLATE] = 0x7654321;
     p__free_locale(locale);
-    ret.ull = 0;
-    p__Getcoll_arg = (void*)p__Getcoll;
-    p__Getcoll_arg(&ret.collvec);
-    ok(ret.collvec.handle == 0, "ret.handle = %x\n", ret.collvec.handle);
-    ok(ret.collvec.page == 0, "ret.page = %x\n", ret.collvec.page);
-
-    ret.ull = p__Getcoll();
-    ok(ret.collvec.handle == 0x7654321, "ret.collvec.handle = %x\n", ret.collvec.handle);
-    ok(ret.collvec.page == 0, "ret.page = %x\n", ret.collvec.page);
+    call__Getcoll(ret);
+    ok(ret.handle == 0x7654321, "ret.handle = %lx\n", ret.handle);
+    ok(ret.page == 0, "ret.page = %x\n", ret.page);
 }
 
 static void test_towctrans(void)
@@ -1110,6 +1110,26 @@ static void test__Strxfrm(void)
     ok(!strcmp(in, out), "out = %s\n", out);
 }
 
+static void test__Wcsxfrm(void)
+{
+    const wchar_t in[] = L"abc";
+
+    MSVCP__Collvec coll;
+    wchar_t out[64];
+    size_t ret;
+
+    memset(&coll, 0, sizeof(coll));
+
+    out[0] = 'z';
+    ret = p__Wcsxfrm(out, out + 1, in, in + 2, &coll);
+    ok(ret == 2, "ret = %d\n", (int)ret);
+    ok(out[0] == 'z', "out[0] = %x\n", out[0]);
+
+    ret = p__Wcsxfrm(out, out + ARRAY_SIZE(out), in, in + 4, &coll);
+    ok(ret == 4, "ret = %d\n", (int)ret);
+    ok(!wcscmp(in, out), "out = %s\n", wine_dbgstr_w(out));
+}
+
 START_TEST(misc)
 {
     if(!init())
@@ -1131,6 +1151,7 @@ START_TEST(misc)
     test_locale__Locimp__Locimp_Addfac();
     test_raise_handler();
     test__Strxfrm();
+    test__Wcsxfrm();
 
     ok(!invalid_parameter, "invalid_parameter_handler was invoked too many times\n");
 

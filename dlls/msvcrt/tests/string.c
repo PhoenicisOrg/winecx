@@ -33,6 +33,7 @@
 
 /* make it use a definition from string.h */
 #undef strncpy
+#undef wcsncpy
 #include "winbase.h"
 #include "winnls.h"
 #include "winuser.h"
@@ -1684,6 +1685,14 @@ static void test_strtok(void)
                 "third call string (%p) \'%s\' return %p\n",
                 teststr, testcases_strtok[i].string, strret);
     }
+
+    strcpy( teststr, "test a=b" );
+    strret = strtok( teststr, " " );
+    ok( strret == teststr, "strret = %p, expected %p\n", strret, teststr );
+    strret = strtok( NULL, "ab=" );
+    ok( !strret, "strret = %p, expected NULL\n", strret );
+    strret = strtok( NULL, "=" );
+    ok( !strret, "strret = %p, expected NULL\n", strret );
 }
 
 static void test_strtol(void)
@@ -1698,58 +1707,58 @@ static void test_strtol(void)
     /* errno is modified on W2K8+ */
     errno = EBADF;
     l = strtol("-1234", &e, 0);
-    ok(l==-1234, "wrong value %d\n", l);
+    ok(l==-1234, "wrong value %ld\n", l);
     ok(errno == EBADF || broken(errno == 0), "wrong errno %d\n", errno);
     errno = EBADF;
     ul = strtoul("1234", &e, 0);
-    ok(ul==1234, "wrong value %u\n", ul);
+    ok(ul==1234, "wrong value %lu\n", ul);
     ok(errno == EBADF || broken(errno == 0), "wrong errno %d\n", errno);
 
     errno = EBADF;
     l = strtol("2147483647L", &e, 0);
-    ok(l==2147483647, "wrong value %d\n", l);
+    ok(l==2147483647, "wrong value %ld\n", l);
     ok(errno == EBADF || broken(errno == 0), "wrong errno %d\n", errno);
     errno = EBADF;
     l = strtol("-2147483648L", &e, 0);
-    ok(l==-2147483647L - 1, "wrong value %d\n", l);
+    ok(l==-2147483647L - 1, "wrong value %ld\n", l);
     ok(errno == EBADF || broken(errno == 0), "wrong errno %d\n", errno);
     errno = EBADF;
     ul = strtoul("4294967295UL", &e, 0);
-    ok(ul==4294967295ul, "wrong value %u\n", ul);
+    ok(ul==4294967295ul, "wrong value %lu\n", ul);
     ok(errno == EBADF || broken(errno == 0), "wrong errno %d\n", errno);
 
     errno = 0;
     l = strtol("9223372036854775807L", &e, 0);
-    ok(l==2147483647, "wrong value %d\n", l);
+    ok(l==2147483647, "wrong value %ld\n", l);
     ok(errno == ERANGE, "wrong errno %d\n", errno);
     errno = 0;
     ul = strtoul("9223372036854775807L", &e, 0);
-    ok(ul==4294967295ul, "wrong value %u\n", ul);
+    ok(ul==4294967295ul, "wrong value %lu\n", ul);
     ok(errno == ERANGE, "wrong errno %d\n", errno);
 
     errno = 0;
     ul = strtoul("-2", NULL, 0);
-    ok(ul == -2, "wrong value %u\n", ul);
+    ok(ul == -2, "wrong value %lu\n", ul);
     ok(errno == 0, "wrong errno %d\n", errno);
 
     errno = 0;
     ul = strtoul("-4294967294", NULL, 0);
-    ok(ul == 2, "wrong value %u\n", ul);
+    ok(ul == 2, "wrong value %lu\n", ul);
     ok(errno == 0, "wrong errno %d\n", errno);
 
     errno = 0;
     ul = strtoul("-4294967295", NULL, 0);
-    ok(ul==1, "wrong value %u\n", ul);
+    ok(ul==1, "wrong value %lu\n", ul);
     ok(errno == 0, "wrong errno %d\n", errno);
 
     errno = 0;
     ul = strtoul("-4294967296", NULL, 0);
-    ok(ul == 1, "wrong value %u\n", ul);
+    ok(ul == 1, "wrong value %lu\n", ul);
     ok(errno == ERANGE, "wrong errno %d\n", errno);
 
     errno = 0;
     l = strtol(neg, &e, 0);
-    ok(l == 0, "wrong value %d\n", l);
+    ok(l == 0, "wrong value %ld\n", l);
     ok(errno == 0, "wrong errno %d\n", errno);
     ok(e == neg, "e = %p, neg = %p\n", e, neg);
 }
@@ -2094,6 +2103,22 @@ static void test_mbstowcs(void)
     ok(ret == 0, "wcstombs did not return 0, got %d\n", (int)ret);
     ok(!mOut[0], "mOut = %s\n", mOut);
 
+    if(pwcsrtombs) {
+        pwstr = wSimple;
+        err = -3;
+        ret = pwcsrtombs(mOut, &pwstr, 4, &err);
+        ok(ret == 4, "wcsrtombs did not return 4\n");
+        ok(err == 0, "err = %d\n", err);
+        ok(pwstr == wSimple+4, "pwstr = %p (wszSimple = %p)\n", pwstr, wSimple);
+        ok(!memcmp(mOut, mSimple, ret), "mOut = %s\n", mOut);
+
+        pwstr = wSimple;
+        ret = pwcsrtombs(mOut, &pwstr, 5, NULL);
+        ok(ret == 4, "wcsrtombs did not return 4\n");
+        ok(pwstr == NULL, "pwstr != NULL\n");
+        ok(!memcmp(mOut, mSimple, sizeof(mSimple)), "mOut = %s\n", mOut);
+    }
+
     if(!setlocale(LC_ALL, "Japanese_Japan.932")) {
         win_skip("Japanese_Japan.932 locale not available\n");
         return;
@@ -2324,7 +2349,7 @@ static void test__wcstombs_s_l(void)
         memset(out, 0xcc, sizeof(out));
         err = p_wcstombs_s_l(&ret, tests[i].str ? out : NULL, tests[i].len,
                              tests[i].wstr, tests[i].wlen, locale);
-        ok(ret == tests[i].ret, "%d: expected ret %d, got %d for '%s' in locale %s\n", i, tests[i].ret, ret,
+        ok(ret == tests[i].ret, "%d: expected ret %Id, got %Id for '%s' in locale %s\n", i, tests[i].ret, ret,
             wine_dbgstr_w(tests[i].wstr), tests[i].locale);
         ok(err == tests[i].err, "%d: expected err %d, got %d for '%s' in locale %s\n", i, tests[i].err, err,
             wine_dbgstr_w(tests[i].wstr), tests[i].locale);
@@ -4441,6 +4466,17 @@ static void test__mbbtype(void)
     }
 }
 
+static void test_wcsncpy(void)
+{
+    wchar_t dst[6], *p;
+
+    memset(dst, 0xff, sizeof(dst));
+    p = wcsncpy(dst, L"1234567", 6);
+    ok(p == dst, "Unexpected return value.\n");
+    ok(!memcmp(dst, L"123456", sizeof(dst)), "unexpected buffer %s\n",
+            wine_dbgstr_wn(dst, ARRAY_SIZE(dst)));
+}
+
 START_TEST(string)
 {
     char mem[100];
@@ -4596,4 +4632,5 @@ START_TEST(string)
     test___STRINGTOLD();
     test_SpecialCasing();
     test__mbbtype();
+    test_wcsncpy();
 }

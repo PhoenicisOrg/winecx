@@ -21,9 +21,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "wined3d_private.h"
 #include "winternl.h"
 
@@ -158,6 +155,15 @@ UINT64 adapter_adjust_memory(struct wined3d_adapter *adapter, INT64 amount)
     return adapter->vram_bytes_used;
 }
 
+ssize_t adapter_adjust_mapped_memory(struct wined3d_adapter *adapter, ssize_t size)
+{
+    /* Note that this needs to be thread-safe; the Vulkan adapter may map from
+     * client threads. */
+    ssize_t ret = InterlockedExchangeAddSizeT(&adapter->mapped_size, size) + size;
+    TRACE("Adjusted mapped adapter memory by %Id to %Id.\n", size, ret);
+    return ret;
+}
+
 void wined3d_adapter_cleanup(struct wined3d_adapter *adapter)
 {
     unsigned int output_idx;
@@ -187,6 +193,7 @@ ULONG CDECL wined3d_decref(struct wined3d *wined3d)
     {
         unsigned int i;
 
+        wined3d_mutex_lock();
         for (i = 0; i < wined3d->adapter_count; ++i)
         {
             struct wined3d_adapter *adapter = wined3d->adapters[i];
@@ -194,6 +201,7 @@ ULONG CDECL wined3d_decref(struct wined3d *wined3d)
             adapter->adapter_ops->adapter_destroy(adapter);
         }
         heap_free(wined3d);
+        wined3d_mutex_unlock();
     }
 
     return refcount;
@@ -455,6 +463,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_GEFORCE_RTX2070,    "NVIDIA GeForce RTX 2070",          DRIVER_NVIDIA_KEPLER,  8192},
     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_GEFORCE_RTX2080,    "NVIDIA GeForce RTX 2080",          DRIVER_NVIDIA_KEPLER,  8192},
     {HW_VENDOR_NVIDIA,     CARD_NVIDIA_GEFORCE_RTX2080TI,  "NVIDIA GeForce RTX 2080 Ti",       DRIVER_NVIDIA_KEPLER,  11264},
+    {HW_VENDOR_NVIDIA,     CARD_NVIDIA_TESLA_T4,           "NVIDIA Tesla T4",                  DRIVER_NVIDIA_KEPLER,  16384},
 
     /* AMD cards */
     {HW_VENDOR_AMD,        CARD_AMD_RAGE_128PRO,           "ATI Rage Fury",                    DRIVER_AMD_RAGE_128PRO,  16  },
@@ -516,6 +525,7 @@ static const struct wined3d_gpu_description gpu_description_table[] =
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_10,     "Radeon RX 5700 / 5700 XT",         DRIVER_AMD_RX,           8192},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_14,     "Radeon RX 5500M",                  DRIVER_AMD_RX,           4096},
     {HW_VENDOR_AMD,        CARD_AMD_RADEON_RX_NAVI_21,     "Radeon RX 6800/6800 XT / 6900 XT", DRIVER_AMD_RX,          16384},
+    {HW_VENDOR_AMD,        CARD_AMD_VANGOGH,               "AMD VANGOGH",                      DRIVER_AMD_RX,           4096},
 
     /* Red Hat */
     {HW_VENDOR_REDHAT,     CARD_REDHAT_VIRGL,              "Red Hat VirtIO GPU",                                        DRIVER_REDHAT_VIRGL,  1024},
@@ -1226,8 +1236,8 @@ HRESULT CDECL wined3d_output_find_closest_matching_mode(const struct wined3d_out
     closest = ~0u;
     for (i = 0, j = 0; i < matching_mode_count; ++i)
     {
-        unsigned int d = abs(mode->width - matching_modes[i]->width)
-                + abs(mode->height - matching_modes[i]->height);
+        unsigned int d = abs((int)(mode->width - matching_modes[i]->width))
+            + abs((int)(mode->height - matching_modes[i]->height));
 
         if (closest > d)
         {
@@ -1551,6 +1561,42 @@ HRESULT CDECL wined3d_adapter_get_identifier(const struct wined3d_adapter *adapt
 
     wined3d_mutex_unlock();
 
+    {
+        WCHAR name[MAX_PATH], *module_exe;
+        if (GetModuleFileNameW(NULL, name, sizeof(name)))
+        {
+            module_exe = wcsrchr(name, '\\');
+            module_exe = module_exe ? module_exe + 1 : name;
+
+            /* CW HACK 19356 */
+            if (!lstrcmpW(module_exe, L"GTAIV.exe"))
+            {
+                /* GTA IV hangs on launch trying to init nvapi if it sees an NVIDIA GPU */
+                if (identifier->vendor_id == HW_VENDOR_NVIDIA)
+                {
+                    identifier->vendor_id = HW_VENDOR_AMD;
+                    identifier->device_id = CARD_AMD_RADEON_RX_480;
+                }
+
+                /* GTA IV ends up using its "Intel integrated" codepath for determining
+                 * VRAM size (since nvapi/atiadlxx fail), but this requires that
+                 * DedicatedVideoMemory is a very small dummy value, and SharedSystemMemory
+                 * is the actual VRAM size.
+                 * Swap the memory values around so this works.
+                 */
+                identifier->shared_system_memory = identifier->video_memory;
+                identifier->video_memory = 32 * 1024 * 1024;
+            }
+
+            /* CW HACK 19355: GTA 5 crashes on launch trying to init nvapi if it sees an NVIDIA GPU */
+            if (!lstrcmpW(module_exe, L"GTA5.exe") && (identifier->vendor_id == HW_VENDOR_NVIDIA))
+            {
+                    identifier->vendor_id = HW_VENDOR_AMD;
+                    identifier->device_id = CARD_AMD_RADEON_RX_480;
+            }
+        }
+    }
+
     return WINED3D_OK;
 }
 
@@ -1819,7 +1865,9 @@ HRESULT CDECL wined3d_check_device_format(const struct wined3d *wined3d,
 
             allowed_usage = WINED3DUSAGE_DYNAMIC;
             allowed_bind_flags = WINED3D_BIND_SHADER_RESOURCE
-                    | WINED3D_BIND_UNORDERED_ACCESS;
+                    | WINED3D_BIND_UNORDERED_ACCESS
+                    | WINED3D_BIND_VERTEX_BUFFER
+                    | WINED3D_BIND_INDEX_BUFFER;
             gl_type = gl_type_end = WINED3D_GL_RES_TYPE_BUFFER;
             break;
 
@@ -1851,6 +1899,11 @@ HRESULT CDECL wined3d_check_device_format(const struct wined3d *wined3d,
         format_flags |= WINED3DFMT_FLAG_DEPTH_STENCIL;
     if (bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
         format_flags |= WINED3DFMT_FLAG_UNORDERED_ACCESS;
+    if (bind_flags & WINED3D_BIND_VERTEX_BUFFER)
+        format_flags |= WINED3DFMT_FLAG_VERTEX_ATTRIBUTE;
+    if (bind_flags & WINED3D_BIND_INDEX_BUFFER)
+        format_flags |= WINED3DFMT_FLAG_INDEX_BUFFER;
+
     if (usage & WINED3DUSAGE_QUERY_FILTER)
         format_flags |= WINED3DFMT_FLAG_FILTERING;
     if (usage & WINED3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING)
@@ -2771,7 +2824,7 @@ static void *adapter_no3d_map_bo_address(struct wined3d_context *context,
 {
     if (data->buffer_object)
     {
-        ERR("Unsupported buffer object %#lx.\n", data->buffer_object);
+        ERR("Unsupported buffer object %p.\n", data->buffer_object);
         return NULL;
     }
 
@@ -2782,19 +2835,39 @@ static void adapter_no3d_unmap_bo_address(struct wined3d_context *context,
         const struct wined3d_bo_address *data, unsigned int range_count, const struct wined3d_range *ranges)
 {
     if (data->buffer_object)
-        ERR("Unsupported buffer object %#lx.\n", data->buffer_object);
+        ERR("Unsupported buffer object %p.\n", data->buffer_object);
 }
 
 static void adapter_no3d_copy_bo_address(struct wined3d_context *context,
-        const struct wined3d_bo_address *dst, const struct wined3d_bo_address *src, size_t size)
+        const struct wined3d_bo_address *dst, const struct wined3d_bo_address *src,
+        unsigned int range_count, const struct wined3d_range *ranges)
 {
+    unsigned int i;
+
     if (dst->buffer_object)
-        ERR("Unsupported dst buffer object %#lx.\n", dst->buffer_object);
+        ERR("Unsupported dst buffer object %p.\n", dst->buffer_object);
     if (src->buffer_object)
-        ERR("Unsupported src buffer object %#lx.\n", src->buffer_object);
+        ERR("Unsupported src buffer object %p.\n", src->buffer_object);
     if (dst->buffer_object || src->buffer_object)
         return;
-    memcpy(dst->addr, src->addr, size);
+
+    for (i = 0; i < range_count; ++i)
+        memcpy(dst->addr + ranges[i].offset, src->addr + ranges[i].offset, ranges[i].size);
+}
+
+static void adapter_no3d_flush_bo_address(struct wined3d_context *context,
+        const struct wined3d_const_bo_address *data, size_t size)
+{
+}
+
+static bool adapter_no3d_alloc_bo(struct wined3d_device *device, struct wined3d_resource *resource,
+        unsigned int sub_resource_idx, struct wined3d_bo_address *addr)
+{
+    return false;
+}
+
+static void adapter_no3d_destroy_bo(struct wined3d_context *context, struct wined3d_bo *bo)
+{
 }
 
 static HRESULT adapter_no3d_create_swapchain(struct wined3d_device *device,
@@ -3066,6 +3139,9 @@ static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops =
     .adapter_map_bo_address = adapter_no3d_map_bo_address,
     .adapter_unmap_bo_address = adapter_no3d_unmap_bo_address,
     .adapter_copy_bo_address = adapter_no3d_copy_bo_address,
+    .adapter_flush_bo_address = adapter_no3d_flush_bo_address,
+    .adapter_alloc_bo = adapter_no3d_alloc_bo,
+    .adapter_destroy_bo = adapter_no3d_destroy_bo,
     .adapter_create_swapchain = adapter_no3d_create_swapchain,
     .adapter_destroy_swapchain = adapter_no3d_destroy_swapchain,
     .adapter_create_buffer = adapter_no3d_create_buffer,
@@ -3259,12 +3335,10 @@ static struct wined3d_adapter *wined3d_adapter_create(unsigned int ordinal, DWOR
     if (wined3d_settings.renderer == WINED3D_RENDERER_OPENGL)
         return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
 
-#ifdef __APPLE__
-    if (!(wined3d_creation_flags & WINED3D_PIXEL_CENTER_INTEGER))
-    {
-        if ((adapter = wined3d_adapter_vk_create(ordinal, wined3d_creation_flags)))
-            ERR_(winediag)("Defaulting to the Vulkan renderer for d3d10/11 applications on macOS.\n");
-    }
+/* CW HACK 18311: Use VK on 64-bit macOS. */
+#ifdef _WIN64
+    if ((adapter = wined3d_adapter_vk_create(ordinal, wined3d_creation_flags)))
+        ERR_(winediag)("Using the Vulkan renderer for d3d10/11 applications.\n");
 #endif
 
     if (!adapter)

@@ -17,9 +17,6 @@
  *
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "dxgi_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
@@ -59,7 +56,7 @@ static ULONG STDMETHODCALLTYPE dxgi_surface_inner_AddRef(IUnknown *iface)
     struct dxgi_surface *surface = impl_from_IUnknown(iface);
     ULONG refcount = InterlockedIncrement(&surface->refcount);
 
-    TRACE("%p increasing refcount to %u.\n", surface, refcount);
+    TRACE("%p increasing refcount to %lu.\n", surface, refcount);
 
     return refcount;
 }
@@ -69,7 +66,7 @@ static ULONG STDMETHODCALLTYPE dxgi_surface_inner_Release(IUnknown *iface)
     struct dxgi_surface *surface = impl_from_IUnknown(iface);
     ULONG refcount = InterlockedDecrement(&surface->refcount);
 
-    TRACE("%p decreasing refcount to %u.\n", surface, refcount);
+    TRACE("%p decreasing refcount to %lu.\n", surface, refcount);
 
     if (!refcount)
     {
@@ -196,14 +193,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_Map(IDXGISurface1 *iface, DXGI_MAP
     if (flags & DXGI_MAP_DISCARD)
         wined3d_map_flags |= WINED3D_MAP_DISCARD;
 
-    wined3d_mutex_lock();
     if (SUCCEEDED(hr = wined3d_resource_map(wined3d_texture_get_resource(surface->wined3d_texture), 0,
             &wined3d_map_desc, NULL, wined3d_map_flags)))
     {
         mapped_rect->Pitch = wined3d_map_desc.row_pitch;
         mapped_rect->pBits = wined3d_map_desc.data;
     }
-    wined3d_mutex_unlock();
 
     return hr;
 }
@@ -213,11 +208,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_Unmap(IDXGISurface1 *iface)
     struct dxgi_surface *surface = impl_from_IDXGISurface1(iface);
 
     TRACE("iface %p.\n", iface);
-
-    wined3d_mutex_lock();
     wined3d_resource_unmap(wined3d_texture_get_resource(surface->wined3d_texture), 0);
-    wined3d_mutex_unlock();
-
     return S_OK;
 }
 

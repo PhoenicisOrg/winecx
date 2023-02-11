@@ -61,6 +61,7 @@ extern const char *winetest_platform;
 
 extern void winetest_set_location( const char* file, int line );
 extern void winetest_subtest( const char* name );
+extern void winetest_ignore_exceptions( BOOL ignore );
 extern void winetest_start_todo( int is_todo );
 extern int winetest_loop_todo(void);
 extern void winetest_end_todo(void);
@@ -78,29 +79,21 @@ extern void winetest_wait_child_process( HANDLE process );
 #define START_TEST(name) void func_##name(void)
 #endif
 
-#if (defined(__x86_64__) || defined(__i386_on_x86_64__) || (defined(__aarch64__) && __has_attribute(ms_abi))) && defined(__GNUC__) && defined(__WINE_USE_MSVCRT)
-#define __winetest_cdecl __cdecl
-#if defined(__i386_on_x86_64__)
-#define __winetest_va_list __builtin_va_list32
-#else
-#define __winetest_va_list __builtin_ms_va_list
-#endif
-#else
-#define __winetest_cdecl
-#define __winetest_va_list va_list
-#endif
-
 extern int broken( int condition );
-extern int winetest_vok( int condition, const char *msg, __winetest_va_list ap );
-extern void winetest_vskip( const char *msg, __winetest_va_list ap );
+extern int winetest_vok( int condition, const char *msg, va_list ap );
+extern void winetest_vskip( const char *msg, va_list ap );
 
-extern void __winetest_cdecl winetest_ok( int condition, const char *msg, ... ) __WINE_PRINTF_ATTR(2,3);
-extern void __winetest_cdecl winetest_skip( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
-extern void __winetest_cdecl winetest_win_skip( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
-extern void __winetest_cdecl winetest_trace( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
+extern void winetest_ok( int condition, const char *msg, ... ) __WINE_PRINTF_ATTR(2,3);
+extern void winetest_skip( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
+extern void winetest_win_skip( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
+extern void winetest_trace( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
+
+extern void winetest_push_context( const char *fmt, ... ) __WINE_PRINTF_ATTR(1, 2);
+extern void winetest_pop_context(void);
 
 #ifdef WINETEST_NO_LINE_NUMBERS
 # define subtest_(file, line)  (winetest_set_location(file, 0), 0) ? (void)0 : winetest_subtest
+# define ignore_exceptions_(file, line)  (winetest_set_location(file, 0), 0) ? (void)0 : winetest_ignore_exceptions
 # define ok_(file, line)       (winetest_set_location(file, 0), 0) ? (void)0 : winetest_ok
 # define skip_(file, line)     (winetest_set_location(file, 0), 0) ? (void)0 : winetest_skip
 # define win_skip_(file, line) (winetest_set_location(file, 0), 0) ? (void)0 : winetest_win_skip
@@ -108,6 +101,7 @@ extern void __winetest_cdecl winetest_trace( const char *msg, ... ) __WINE_PRINT
 # define wait_child_process_(file, line) (winetest_set_location(file, 0), 0) ? (void)0 : winetest_wait_child_process
 #else
 # define subtest_(file, line)  (winetest_set_location(file, line), 0) ? (void)0 : winetest_subtest
+# define ignore_exceptions_(file, line)  (winetest_set_location(file, line), 0) ? (void)0 : winetest_ignore_exceptions
 # define ok_(file, line)       (winetest_set_location(file, line), 0) ? (void)0 : winetest_ok
 # define skip_(file, line)     (winetest_set_location(file, line), 0) ? (void)0 : winetest_skip
 # define win_skip_(file, line) (winetest_set_location(file, line), 0) ? (void)0 : winetest_win_skip
@@ -116,6 +110,7 @@ extern void __winetest_cdecl winetest_trace( const char *msg, ... ) __WINE_PRINT
 #endif
 
 #define subtest  subtest_(__FILE__, __LINE__)
+#define ignore_exceptions  ignore_exceptions_(__FILE__, __LINE__)
 #define ok       ok_(__FILE__, __LINE__)
 #define skip     skip_(__FILE__, __LINE__)
 #define win_skip win_skip_(__FILE__, __LINE__)
@@ -184,17 +179,6 @@ extern void __winetest_cdecl winetest_trace( const char *msg, ... ) __WINE_PRINT
 #include <stdio.h>
 #include <excpt.h>
 
-#if defined(__i386_on_x86_64__) && defined(__WINE_USE_MSVCRT)
-# define __winetest_va_start(list,arg) __builtin_va_start32(list,arg)
-# define __winetest_va_end(list) __builtin_va_end32(list)
-#elif (defined(__x86_64__) || defined(__aarch64__)) && defined(__GNUC__) && defined(__WINE_USE_MSVCRT)
-# define __winetest_va_start(list,arg) __builtin_ms_va_start(list,arg)
-# define __winetest_va_end(list) __builtin_ms_va_end(list)
-#else
-# define __winetest_va_start(list,arg) va_start(list,arg)
-# define __winetest_va_end(list) va_end(list)
-#endif
-
 struct test
 {
     const char *name;
@@ -249,6 +233,8 @@ struct tls_data
     int todo_do_loop;
     char *str_pos;                   /* position in debug buffer */
     char strings[2000];              /* buffer for debug strings */
+    char context[8][128];            /* data to print before messages */
+    unsigned int context_count;      /* number of context prefixes */
 };
 static DWORD tls_index;
 
@@ -298,11 +284,35 @@ const char *winetest_elapsed(void)
     return wine_dbg_sprintf( "%.3f", (now - winetest_start_time) / 1000.0);
 }
 
-void winetest_subtest( const char* name )
+static void winetest_printf( const char *msg, ... ) __WINE_PRINTF_ATTR(1,2);
+static void winetest_printf( const char *msg, ... )
 {
     struct tls_data *data = get_tls_data();
-    printf( "%s:%d:%s Subtest %s\n",
-            data->current_file, data->current_line, winetest_elapsed(), name );
+    va_list valist;
+
+    printf( "%s:%d:%s ", data->current_file, data->current_line, winetest_elapsed() );
+    va_start( valist, msg );
+    vprintf( msg, valist );
+    va_end( valist );
+}
+static void winetest_print_context( const char *msgtype )
+{
+    struct tls_data *data = get_tls_data();
+    unsigned int i;
+
+    winetest_printf( "%s", msgtype );
+    for (i = 0; i < data->context_count; ++i)
+        printf( "%s: ", data->context[i] );
+}
+
+void winetest_subtest( const char* name )
+{
+    winetest_printf( "Subtest %s\n", name );
+}
+
+void winetest_ignore_exceptions( BOOL ignore )
+{
+    winetest_printf( "IgnoreExceptions=%d\n", ignore ? 1 : 0 );
 }
 
 int broken( int condition )
@@ -322,9 +332,7 @@ static LONG winetest_add_line( void )
     index = data->current_line % ARRAY_SIZE(line_counters);
     count = InterlockedIncrement(line_counters + index) - 1;
     if (count == winetest_mute_threshold)
-        printf( "%s:%d:%s Line has been silenced after %d occurrences\n",
-                data->current_file, data->current_line, winetest_elapsed(),
-                winetest_mute_threshold );
+        winetest_printf( "Line has been silenced after %d occurrences\n", winetest_mute_threshold );
 
     return count;
 }
@@ -339,7 +347,7 @@ static LONG winetest_add_line( void )
  * Return:
  *   0 if condition does not have the expected value, 1 otherwise
  */
-int winetest_vok( int condition, const char *msg, __winetest_va_list args )
+int winetest_vok( int condition, const char *msg, va_list args )
 {
     struct tls_data *data = get_tls_data();
 
@@ -347,8 +355,7 @@ int winetest_vok( int condition, const char *msg, __winetest_va_list args )
     {
         if (condition)
         {
-            printf( "%s:%d:%s Test succeeded inside todo block: ",
-                    data->current_file, data->current_line, winetest_elapsed() );
+            winetest_print_context( "Test succeeded inside todo block: " );
             vprintf(msg, args);
             InterlockedIncrement(&todo_failures);
             return 0;
@@ -360,8 +367,7 @@ int winetest_vok( int condition, const char *msg, __winetest_va_list args )
             {
                 if (winetest_debug > 0)
                 {
-                    printf( "%s:%d:%s Test marked todo: ",
-                            data->current_file, data->current_line, winetest_elapsed() );
+                    winetest_print_context( "Test marked todo: " );
                     vprintf(msg, args);
                 }
                 InterlockedIncrement(&todo_successes);
@@ -375,8 +381,7 @@ int winetest_vok( int condition, const char *msg, __winetest_va_list args )
     {
         if (!condition)
         {
-            printf( "%s:%d:%s Test failed: ",
-                    data->current_file, data->current_line, winetest_elapsed() );
+            winetest_print_context( "Test failed: " );
             vprintf(msg, args);
             InterlockedIncrement(&failures);
             return 0;
@@ -386,8 +391,7 @@ int winetest_vok( int condition, const char *msg, __winetest_va_list args )
             if (winetest_report_success ||
                 (winetest_time && GetTickCount() >= winetest_last_time + 1000))
             {
-                printf( "%s:%d:%s Test succeeded\n",
-                        data->current_file, data->current_line, winetest_elapsed() );
+                winetest_printf("Test succeeded\n");
             }
             InterlockedIncrement(&successes);
             return 1;
@@ -395,39 +399,37 @@ int winetest_vok( int condition, const char *msg, __winetest_va_list args )
     }
 }
 
-void __winetest_cdecl winetest_ok( int condition, const char *msg, ... )
+void winetest_ok( int condition, const char *msg, ... )
 {
-    __winetest_va_list valist;
+    va_list valist;
 
-    __winetest_va_start(valist, msg);
+    va_start(valist, msg);
     winetest_vok(condition, msg, valist);
-    __winetest_va_end(valist);
+    va_end(valist);
 }
 
-void __winetest_cdecl winetest_trace( const char *msg, ... )
+void winetest_trace( const char *msg, ... )
 {
-    __winetest_va_list valist;
+    va_list valist;
 
     if (!winetest_debug)
         return;
     if (winetest_add_line() < winetest_mute_threshold)
     {
-        struct tls_data *data = get_tls_data();
-        printf( "%s:%d:%s ", data->current_file, data->current_line, winetest_elapsed() );
-        __winetest_va_start(valist, msg);
-        vprintf(msg, valist);
-        __winetest_va_end(valist);
+        winetest_print_context( "" );
+        va_start(valist, msg);
+        vprintf( msg, valist );
+        va_end(valist);
     }
     else
         InterlockedIncrement(&muted_traces);
 }
 
-void winetest_vskip( const char *msg, __winetest_va_list args )
+void winetest_vskip( const char *msg, va_list args )
 {
     if (winetest_add_line() < winetest_mute_threshold)
     {
-        struct tls_data *data = get_tls_data();
-        printf( "%s:%d:%s Tests skipped: ", data->current_file, data->current_line, winetest_elapsed() );
+        winetest_print_context( "Tests skipped: " );
         vprintf(msg, args);
         InterlockedIncrement(&skipped);
     }
@@ -435,23 +437,23 @@ void winetest_vskip( const char *msg, __winetest_va_list args )
         InterlockedIncrement(&muted_skipped);
 }
 
-void __winetest_cdecl winetest_skip( const char *msg, ... )
+void winetest_skip( const char *msg, ... )
 {
-    __winetest_va_list valist;
-    __winetest_va_start(valist, msg);
+    va_list valist;
+    va_start(valist, msg);
     winetest_vskip(msg, valist);
-    __winetest_va_end(valist);
+    va_end(valist);
 }
 
-void __winetest_cdecl winetest_win_skip( const char *msg, ... )
+void winetest_win_skip( const char *msg, ... )
 {
-    __winetest_va_list valist;
-    __winetest_va_start(valist, msg);
+    va_list valist;
+    va_start(valist, msg);
     if (strcmp(winetest_platform, "windows") == 0)
         winetest_vskip(msg, valist);
     else
         winetest_vok(0, msg, valist);
-    __winetest_va_end(valist);
+    va_end(valist);
 }
 
 void winetest_start_todo( int is_todo )
@@ -473,6 +475,29 @@ void winetest_end_todo(void)
 {
     struct tls_data *data = get_tls_data();
     data->todo_level >>= 1;
+}
+
+void winetest_push_context( const char *fmt, ... )
+{
+    struct tls_data *data = get_tls_data();
+    va_list valist;
+
+    if (data->context_count < ARRAY_SIZE(data->context))
+    {
+        va_start(valist, fmt);
+        vsnprintf( data->context[data->context_count], sizeof(data->context[data->context_count]), fmt, valist );
+        va_end(valist);
+        data->context[data->context_count][sizeof(data->context[data->context_count]) - 1] = 0;
+    }
+    ++data->context_count;
+}
+
+void winetest_pop_context(void)
+{
+    struct tls_data *data = get_tls_data();
+
+    if (data->context_count)
+        --data->context_count;
 }
 
 int winetest_get_mainargs( char*** pargv )
@@ -504,25 +529,20 @@ void winetest_wait_child_process( HANDLE process )
         winetest_ok( 0, "Timed out waiting for the child process\n" );
     else if (ret != WAIT_OBJECT_0)
         winetest_ok( 0, "Could not wait for the child process: %d le=%u\n",
-                     ret, GetLastError() );
+                     (UINT)ret, (UINT)GetLastError() );
     else
     {
         DWORD exit_code;
-        struct tls_data *data = get_tls_data();
         GetExitCodeProcess( process, &exit_code );
         if (exit_code > 255)
         {
             DWORD pid = GetProcessId( process );
-            printf( "%s:%d:%s unhandled exception %08x in child process %04x\n",
-                    current_test->name, data->current_line, winetest_elapsed(),
-                    exit_code, pid );
+            winetest_printf( "unhandled exception %08x in child process %04x\n", (UINT)exit_code, (UINT)pid );
             InterlockedIncrement( &failures );
         }
         else if (exit_code)
         {
-            printf( "%s:%d:%s %u failures in child process\n",
-                    current_test->name, data->current_line, winetest_elapsed(),
-                    exit_code );
+            winetest_printf( "%u failures in child process\n", (UINT)exit_code );
             while (exit_code-- > 0)
                 InterlockedIncrement(&failures);
         }
@@ -579,14 +599,14 @@ static int run_test( const char *name )
     {
         if (muted_todo_successes || muted_skipped || muted_traces)
             printf( "%04x:%s:%s Silenced %d todos, %d skips and %d traces.\n",
-                    GetCurrentProcessId(), test->name, winetest_elapsed(),
-                    muted_todo_successes, muted_skipped, muted_traces);
+                    (UINT)GetCurrentProcessId(), test->name, winetest_elapsed(),
+                    (UINT)muted_todo_successes, (UINT)muted_skipped, (UINT)muted_traces);
         printf( "%04x:%s:%s %d tests executed (%d marked as todo, %d %s), %d skipped.\n",
-                GetCurrentProcessId(), test->name, winetest_elapsed(),
-                successes + failures + todo_successes + todo_failures,
-                todo_successes, failures + todo_failures,
+                (UINT)GetCurrentProcessId(), test->name, winetest_elapsed(),
+                (UINT)(successes + failures + todo_successes + todo_failures),
+                (UINT)todo_successes, (UINT)(failures + todo_failures),
                 (failures + todo_failures != 1) ? "failures" : "failure",
-                skipped );
+                (UINT)skipped );
     }
     status = (failures + todo_failures < 255) ? failures + todo_failures : 255;
     return status;
@@ -610,8 +630,8 @@ static LONG CALLBACK exc_filter( EXCEPTION_POINTERS *ptrs )
         printf( "%s:%d: this is the last test seen before the exception\n",
                 data->current_file, data->current_line );
     printf( "%04x:%s:%s unhandled exception %08x at %p\n",
-            GetCurrentProcessId(), current_test->name, winetest_elapsed(),
-            ptrs->ExceptionRecord->ExceptionCode, ptrs->ExceptionRecord->ExceptionAddress );
+            (UINT)GetCurrentProcessId(), current_test->name, winetest_elapsed(),
+            (UINT)ptrs->ExceptionRecord->ExceptionCode, ptrs->ExceptionRecord->ExceptionAddress );
     fflush( stdout );
     return EXCEPTION_EXECUTE_HANDLER;
 }

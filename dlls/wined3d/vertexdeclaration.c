@@ -22,8 +22,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-#include "wine/port.h"
 #include "wined3d_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d_decl);
@@ -68,9 +66,11 @@ ULONG CDECL wined3d_vertex_declaration_decref(struct wined3d_vertex_declaration 
 
     if (!refcount)
     {
+        wined3d_mutex_lock();
         declaration->parent_ops->wined3d_object_destroyed(declaration->parent);
         wined3d_cs_destroy_object(declaration->device->cs,
                 wined3d_vertex_declaration_destroy_object, declaration);
+        wined3d_mutex_unlock();
     }
 
     return refcount;

@@ -17,8 +17,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-
 #include <stdarg.h>
 
 #include "windef.h"
@@ -33,32 +31,12 @@
 WINE_DEFAULT_DEBUG_CHANNEL(xaudio2);
 #endif
 
-#ifdef X3DAUDIO1_VER
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, void *pReserved)
-{
-    TRACE("(%p, %d, %p)\n", hinstDLL, reason, pReserved);
-
-    switch (reason)
-    {
-    case DLL_PROCESS_ATTACH:
-        DisableThreadLibraryCalls( hinstDLL );
-        break;
-    }
-    return TRUE;
-}
-#endif /* X3DAUDIO1_VER */
-
 #if XAUDIO2_VER >= 8
 HRESULT CDECL X3DAudioInitialize(UINT32 chanmask, float speedofsound,
         X3DAUDIO_HANDLE handle)
 {
     TRACE("0x%x, %f, %p\n", chanmask, speedofsound, handle);
-#ifdef HAVE_F3DAUDIOINITIALIZE8
     return F3DAudioInitialize8(chanmask, speedofsound, handle);
-#else
-    F3DAudioInitialize(chanmask, speedofsound, handle);
-    return S_OK;
-#endif
 }
 #endif /* XAUDIO2_VER >= 8 */
 

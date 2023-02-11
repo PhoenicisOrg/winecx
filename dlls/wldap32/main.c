@@ -18,27 +18,35 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
+#include <stdarg.h>
+#include "windef.h"
+#include "winternl.h"
+#include "winbase.h"
 
 #include "wine/debug.h"
-#include <stdarg.h>
-
-#include "windef.h"
-#include "winbase.h"
+#include "libldap.h"
 
 HINSTANCE hwldap32;
 
 WINE_DEFAULT_DEBUG_CHANNEL(wldap32);
 
+unixlib_handle_t ldap_handle = 0;
+
 BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
 {
-    TRACE( "(%p, %d, %p)\n", hinst, reason, reserved );
+    TRACE( "(%p, %#lx, %p)\n", hinst, reason, reserved );
 
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
         hwldap32 = hinst;
         DisableThreadLibraryCalls( hinst );
+        if (NtQueryVirtualMemory( GetCurrentProcess(), hinst, MemoryWineUnixFuncs,
+                                  &ldap_handle, sizeof(ldap_handle), NULL ) || LDAP_CALL( process_attach, NULL ))
+	{
+            ldap_handle = 0;
+            ERR( "No libldap support, expect problems\n" );
+        }
         break;
     }
     return TRUE;

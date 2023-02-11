@@ -29,7 +29,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(event);
 
 
 /* return the name of an Mac event */
-static const char * HOSTPTR dbgstr_event(int type)
+static const char *dbgstr_event(int type)
 {
     static const char * const event_names[] = {
         "APP_ACTIVATED",
@@ -282,6 +282,9 @@ void macdrv_handle_event(const macdrv_event *event)
     case WINDOW_CLOSE_REQUESTED:
         macdrv_window_close_requested(hwnd);
         break;
+    case WINDOW_DID_MINIMIZE:
+        macdrv_window_did_minimize(hwnd);
+        break;
     case WINDOW_DID_UNMINIMIZE:
         macdrv_window_did_unminimize(hwnd);
         break;
@@ -343,8 +346,8 @@ static int process_events(macdrv_event_queue queue, macdrv_event_mask mask)
 /***********************************************************************
  *              MsgWaitForMultipleObjectsEx   (MACDRV.@)
  */
-DWORD CDECL macdrv_MsgWaitForMultipleObjectsEx(DWORD count, const HANDLE *handles,
-                                               DWORD timeout, DWORD mask, DWORD flags)
+DWORD macdrv_MsgWaitForMultipleObjectsEx(DWORD count, const HANDLE *handles,
+                                         DWORD timeout, DWORD mask, DWORD flags)
 {
     DWORD ret;
     struct macdrv_thread_data *data = macdrv_thread_data();

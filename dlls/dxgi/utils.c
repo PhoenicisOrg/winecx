@@ -17,9 +17,6 @@
  *
  */
 
-#include "config.h"
-#include "wine/port.h"
-
 #include "dxgi_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
@@ -384,7 +381,7 @@ enum wined3d_format_id wined3dformat_from_dxgi_format(DXGI_FORMAT format)
     }
 }
 
-const char * HOSTPTR debug_dxgi_mode(const DXGI_MODE_DESC *desc)
+const char *debug_dxgi_mode(const DXGI_MODE_DESC *desc)
 {
     if (!desc)
         return "(null)";
@@ -395,7 +392,7 @@ const char * HOSTPTR debug_dxgi_mode(const DXGI_MODE_DESC *desc)
             debug_dxgi_format(desc->Format), desc->ScanlineOrdering, desc->Scaling);
 }
 
-const char * HOSTPTR debug_dxgi_mode1(const DXGI_MODE_DESC1 *desc)
+const char *debug_dxgi_mode1(const DXGI_MODE_DESC1 *desc)
 {
     if (!desc)
         return "(null)";
@@ -494,8 +491,10 @@ DXGI_USAGE dxgi_usage_from_wined3d_bind_flags(unsigned int wined3d_bind_flags)
         dxgi_usage |= DXGI_USAGE_SHADER_INPUT;
     if (wined3d_bind_flags & WINED3D_BIND_RENDER_TARGET)
         dxgi_usage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    if (wined3d_bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
+        dxgi_usage |= DXGI_USAGE_UNORDERED_ACCESS;
 
-    wined3d_bind_flags &= ~(WINED3D_BIND_SHADER_RESOURCE | WINED3D_BIND_RENDER_TARGET);
+    wined3d_bind_flags &= ~(WINED3D_BIND_SHADER_RESOURCE | WINED3D_BIND_RENDER_TARGET | WINED3D_BIND_UNORDERED_ACCESS);
     if (wined3d_bind_flags)
         FIXME("Unhandled wined3d bind flags %#x.\n", wined3d_bind_flags);
     return dxgi_usage;

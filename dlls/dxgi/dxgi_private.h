@@ -79,8 +79,8 @@ struct dxgi_device_layer
 
 /* TRACE helper functions */
 const char *debug_dxgi_format(DXGI_FORMAT format) DECLSPEC_HIDDEN;
-const char * HOSTPTR debug_dxgi_mode(const DXGI_MODE_DESC *desc) DECLSPEC_HIDDEN;
-const char * HOSTPTR debug_dxgi_mode1(const DXGI_MODE_DESC1 *desc) DECLSPEC_HIDDEN;
+const char *debug_dxgi_mode(const DXGI_MODE_DESC *desc) DECLSPEC_HIDDEN;
+const char *debug_dxgi_mode1(const DXGI_MODE_DESC1 *desc) DECLSPEC_HIDDEN;
 void dump_feature_levels(const D3D_FEATURE_LEVEL *feature_levels, unsigned int level_count) DECLSPEC_HIDDEN;
 
 DXGI_FORMAT dxgi_format_from_wined3dformat(enum wined3d_format_id format) DECLSPEC_HIDDEN;
@@ -182,6 +182,7 @@ struct d3d11_swapchain
     IWineDXGIFactory *factory;
 
     IDXGIOutput *target;
+    LONG present_count;
 };
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,

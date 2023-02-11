@@ -66,6 +66,8 @@ static void get_cocoa_window_features(struct macdrv_win_data *data,
 {
     memset(wf, 0, sizeof(*wf));
 
+    if (ex_style & WS_EX_NOACTIVATE) wf->prevents_app_activation = TRUE;
+
     if (disable_window_decorations) return;
     if (IsRectEmpty(window_rect)) return;
     if (EqualRect(window_rect, client_rect)) return;
@@ -100,17 +102,17 @@ static void get_cocoa_window_features(struct macdrv_win_data *data,
 
 
 /*******************************************************************
- *              can_activate_window
+ *              can_window_become_foreground
  *
- * Check if we can activate the specified window.
+ * Check if the specified window can become the foreground/key
+ * window.
  */
-static inline BOOL can_activate_window(HWND hwnd)
+static inline BOOL can_window_become_foreground(HWND hwnd)
 {
     LONG style = GetWindowLongW(hwnd, GWL_STYLE);
 
     if (!(style & WS_VISIBLE)) return FALSE;
     if ((style & (WS_POPUP|WS_CHILD)) == WS_CHILD) return FALSE;
-    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE) return FALSE;
     if (hwnd == GetDesktopWindow()) return FALSE;
     return !(style & WS_DISABLED);
 }
@@ -125,7 +127,7 @@ static void get_cocoa_window_state(struct macdrv_win_data *data,
 {
     memset(state, 0, sizeof(*state));
     state->disabled = (style & WS_DISABLED) != 0;
-    state->no_activate = !can_activate_window(data->hwnd);
+    state->no_foreground = !can_window_become_foreground(data->hwnd);
     state->floating = (ex_style & WS_EX_TOPMOST) != 0;
     state->excluded_by_expose = state->excluded_by_cycle =
         (!(ex_style & WS_EX_APPWINDOW) &&
@@ -829,8 +831,7 @@ static void set_cocoa_view_parent(struct macdrv_win_data *data, HWND parent)
     macdrv_window cocoa_window = parent_data ? parent_data->cocoa_window : NULL;
     macdrv_view superview = parent_data ? parent_data->client_cocoa_view : NULL;
 
-    TRACE("win %p/%p parent %p/%p\n", data->hwnd, data->cocoa_view, parent,
-          cocoa_window ? (void* HOSTPTR)cocoa_window : (void* HOSTPTR)superview);
+    TRACE("win %p/%p parent %p/%p\n", data->hwnd, data->cocoa_view, parent, cocoa_window ? (void* HOSTPTR)cocoa_window : (void* HOSTPTR)superview);
 
     if (!cocoa_window && !superview)
         WARN("hwnd %p new parent %p has no Cocoa window or view in this process\n", data->hwnd, parent);
@@ -1623,7 +1624,7 @@ static void perform_window_command(HWND hwnd, DWORD style_any, DWORD style_none,
 /**********************************************************************
  *              CreateDesktopWindow   (MACDRV.@)
  */
-BOOL CDECL macdrv_CreateDesktopWindow(HWND hwnd)
+BOOL macdrv_CreateDesktopWindow(HWND hwnd)
 {
     unsigned int width, height;
 
@@ -1693,7 +1694,7 @@ static LRESULT CALLBACK desktop_wndproc_wrapper( HWND hwnd, UINT msg, WPARAM wp,
 /**********************************************************************
  *              CreateWindow   (MACDRV.@)
  */
-BOOL CDECL macdrv_CreateWindow(HWND hwnd)
+BOOL macdrv_CreateWindow(HWND hwnd)
 {
     if (hwnd == GetDesktopWindow())
     {
@@ -1709,7 +1710,7 @@ BOOL CDECL macdrv_CreateWindow(HWND hwnd)
 /***********************************************************************
  *              DestroyWindow   (MACDRV.@)
  */
-void CDECL macdrv_DestroyWindow(HWND hwnd)
+void macdrv_DestroyWindow(HWND hwnd)
 {
     struct macdrv_win_data *data;
 
@@ -1735,7 +1736,7 @@ void CDECL macdrv_DestroyWindow(HWND hwnd)
  *
  * Set the Mac focus.
  */
-void CDECL macdrv_SetFocus(HWND hwnd)
+void macdrv_SetFocus(HWND hwnd)
 {
     struct macdrv_thread_data *thread_data = macdrv_thread_data();
 
@@ -1752,7 +1753,7 @@ void CDECL macdrv_SetFocus(HWND hwnd)
  *
  * Set transparency attributes for a layered window.
  */
-void CDECL macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha, DWORD flags)
+void macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha, DWORD flags)
 {
     struct macdrv_win_data *data = get_win_data(hwnd);
 
@@ -1780,7 +1781,7 @@ void CDECL macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha
 /*****************************************************************
  *              SetParent   (MACDRV.@)
  */
-void CDECL macdrv_SetParent(HWND hwnd, HWND parent, HWND old_parent)
+void macdrv_SetParent(HWND hwnd, HWND parent, HWND old_parent)
 {
     struct macdrv_win_data *data;
 
@@ -1814,7 +1815,7 @@ void CDECL macdrv_SetParent(HWND hwnd, HWND parent, HWND old_parent)
  *
  * Assign specified region to window (for non-rectangular windows)
  */
-void CDECL macdrv_SetWindowRgn(HWND hwnd, HRGN hrgn, BOOL redraw)
+void macdrv_SetWindowRgn(HWND hwnd, HRGN hrgn, BOOL redraw)
 {
     struct macdrv_win_data *data;
 
@@ -1841,7 +1842,7 @@ void CDECL macdrv_SetWindowRgn(HWND hwnd, HRGN hrgn, BOOL redraw)
  *
  * Update the state of the Cocoa window to reflect a style change
  */
-void CDECL macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
+void macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
 {
     struct macdrv_win_data *data;
 
@@ -1875,7 +1876,7 @@ void CDECL macdrv_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style)
 /*****************************************************************
  *              SetWindowText   (MACDRV.@)
  */
-void CDECL macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
+void macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
 {
     macdrv_window win;
     WCHAR buf[1024];
@@ -1891,10 +1892,44 @@ void CDECL macdrv_SetWindowText(HWND hwnd, LPCWSTR text)
 }
 
 
+/* CX HACK 19364 and CX HACK 16565 */
+static BOOL is_rockstar_launcher_or_steamwebhelper(void)
+{
+    char name[MAX_PATH], *module_exe;
+    if (!GetModuleFileNameA(NULL, name, sizeof(name)))
+        return FALSE;
+
+    module_exe = strrchr(name, '\\');
+    module_exe = module_exe ? module_exe + 1 : name;
+
+    if (!strcasecmp(module_exe, "steamwebhelper.exe"))
+        return TRUE;
+
+    if (!strcasestr(name, "\\Rockstar Games\\"))
+        return FALSE;
+
+    return !strcasecmp(module_exe, "Launcher.exe") || !strcasecmp(module_exe, "SocialClubHelper.exe");
+}
+
+static BOOL needs_zorder_hack(void)
+{
+    static BOOL needs_hack, did_check = FALSE;
+
+    if (!did_check)
+    {
+        needs_hack = is_rockstar_launcher_or_steamwebhelper();
+        did_check = TRUE;
+    }
+
+    return needs_hack;
+}
+/* END HACK */
+
+
 /***********************************************************************
  *              ShowWindow   (MACDRV.@)
  */
-UINT CDECL macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
+UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
 {
     struct macdrv_thread_data *thread_data = macdrv_thread_data();
     struct macdrv_win_data *data = get_win_data(hwnd);
@@ -1904,7 +1939,36 @@ UINT CDECL macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
           hwnd, data ? data->cocoa_window : NULL, cmd, wine_dbgstr_rect(rect), swp);
 
     if (!data || !data->cocoa_window) goto done;
+
+    /* CX HACK 19364 and CX HACK 16565 */
+    /* Cross-process window hierarchy in the Rockstar Games launcher (Social Club) and Steam. */
+    if ((cmd == SW_SHOW || cmd == SW_SHOWNOACTIVATE) && needs_zorder_hack())
+    {
+        DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+        BOOL is_popup = (style & WS_POPUP) != 0;
+        BOOL was_visible = (style & WS_VISIBLE) != 0;
+
+        /* Showing a previously hidden popup? */
+        if (is_popup && !was_visible)
+        {
+            HWND owner = GetWindow(hwnd, GW_OWNER);
+            DWORD owner_pid;
+            GetWindowThreadProcessId(owner, &owner_pid);
+
+            if (owner_pid != GetCurrentProcessId())
+            {
+                /* Out-of-process owner? Bring the window to the front.
+                 * We don't want to activate the app though, especially with
+                 * steamwebhelper, as that causes dropdowns to dismiss
+                 * themselves. This just forces the window on top without focusing
+                 * the app. */
+                macdrv_force_popup_order_front(data->cocoa_window);
+            }
+        }
+    }
+
     if (IsRectEmpty(rect)) goto done;
+
     if (GetWindowLongW(hwnd, GWL_STYLE) & WS_MINIMIZE)
     {
         if (rect->left != -32000 || rect->top != -32000)
@@ -1942,7 +2006,7 @@ done:
  *
  * Perform WM_SYSCOMMAND handling.
  */
-LRESULT CDECL macdrv_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam)
+LRESULT macdrv_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam)
 {
     struct macdrv_win_data *data;
     LRESULT ret = -1;
@@ -1977,8 +2041,8 @@ done:
 /***********************************************************************
  *              UpdateLayeredWindow   (MACDRV.@)
  */
-BOOL CDECL macdrv_UpdateLayeredWindow(HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
-                                      const RECT *window_rect)
+BOOL macdrv_UpdateLayeredWindow(HWND hwnd, const UPDATELAYEREDWINDOWINFO *info,
+                                const RECT *window_rect)
 {
     struct window_surface *surface;
     struct macdrv_win_data *data;
@@ -2087,7 +2151,7 @@ done:
 /**********************************************************************
  *              WindowMessage   (MACDRV.@)
  */
-LRESULT CDECL macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     struct macdrv_win_data *data;
 
@@ -2159,9 +2223,9 @@ static inline RECT get_surface_rect(const RECT *visible_rect)
 /***********************************************************************
  *              WindowPosChanging   (MACDRV.@)
  */
-void CDECL macdrv_WindowPosChanging(HWND hwnd, HWND insert_after, UINT swp_flags,
-                                    const RECT *window_rect, const RECT *client_rect,
-                                    RECT *visible_rect, struct window_surface **surface)
+BOOL macdrv_WindowPosChanging(HWND hwnd, HWND insert_after, UINT swp_flags,
+                              const RECT *window_rect, const RECT *client_rect,
+                              RECT *visible_rect, struct window_surface **surface)
 {
     struct macdrv_win_data *data = get_win_data(hwnd);
     DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
@@ -2171,7 +2235,7 @@ void CDECL macdrv_WindowPosChanging(HWND hwnd, HWND insert_after, UINT swp_flags
           swp_flags, wine_dbgstr_rect(window_rect), wine_dbgstr_rect(client_rect),
           wine_dbgstr_rect(visible_rect), surface);
 
-    if (!data && !(data = macdrv_create_win_data(hwnd, window_rect, client_rect))) return;
+    if (!data && !(data = macdrv_create_win_data(hwnd, window_rect, client_rect))) return TRUE;
 
     *visible_rect = *window_rect;
     macdrv_window_to_mac_rect(data, style, visible_rect, window_rect, client_rect);
@@ -2204,16 +2268,17 @@ void CDECL macdrv_WindowPosChanging(HWND hwnd, HWND insert_after, UINT swp_flags
 
 done:
     release_win_data(data);
+    return TRUE;
 }
 
 
 /***********************************************************************
  *              WindowPosChanged   (MACDRV.@)
  */
-void CDECL macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, UINT swp_flags,
-                                   const RECT *window_rect, const RECT *client_rect,
-                                   const RECT *visible_rect, const RECT *valid_rects,
-                                   struct window_surface *surface)
+void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, UINT swp_flags,
+                             const RECT *window_rect, const RECT *client_rect,
+                             const RECT *visible_rect, const RECT *valid_rects,
+                             struct window_surface *surface)
 {
     struct macdrv_thread_data *thread_data;
     struct macdrv_win_data *data;
@@ -2432,10 +2497,11 @@ void macdrv_window_frame_changed(HWND hwnd, const macdrv_event *event)
         flags |= SWP_NOSENDCHANGING;
     if (!(flags & SWP_NOSIZE) || !(flags & SWP_NOMOVE))
     {
-        if (!event->window_frame_changed.in_resize && !being_dragged)
+        int send_sizemove = !event->window_frame_changed.in_resize && !being_dragged && !event->window_frame_changed.skip_size_move_loop;
+        if (send_sizemove)
             SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0);
         SetWindowPos(hwnd, 0, rect.left, rect.top, width, height, flags);
-        if (!event->window_frame_changed.in_resize && !being_dragged)
+        if (send_sizemove)
             SendMessageW(hwnd, WM_EXITSIZEMOVE, 0, 0);
     }
 }
@@ -2461,7 +2527,7 @@ void macdrv_window_got_focus(HWND hwnd, const macdrv_event *event)
           hwnd, event->window, top, event->window_got_focus.serial, IsWindowEnabled(top),
           IsWindowVisible(top), style, GetFocus(), GetActiveWindow(), GetForegroundWindow());
 
-    if (can_activate_window(top) && !(style & WS_MINIMIZE))
+    if (can_window_become_foreground(hwnd) && !(style & WS_MINIMIZE))
     {
         /* CrossOver Hack #18896: don't send WM_MOUSEACTIVATE, it breaks Unity games */
         {
@@ -2515,6 +2581,8 @@ void macdrv_app_activated(void)
  */
 void macdrv_app_deactivated(void)
 {
+    ClipCursor(NULL);
+
     if (GetActiveWindow() == GetForegroundWindow())
     {
         TRACE("setting fg to desktop\n");
@@ -2542,6 +2610,21 @@ void macdrv_window_maximize_requested(HWND hwnd)
 void macdrv_window_minimize_requested(HWND hwnd)
 {
     perform_window_command(hwnd, WS_MINIMIZEBOX, WS_MINIMIZE, SC_MINIMIZE, HTMINBUTTON);
+}
+
+
+/***********************************************************************
+ *              macdrv_window_did_minimize
+ *
+ * Handler for WINDOW_DID_MINIMIZE events.
+ */
+void macdrv_window_did_minimize(HWND hwnd)
+{
+    TRACE("win %p\n", hwnd);
+
+    /* If all our windows are minimized, disable cursor clipping. */
+    if (!macdrv_is_any_wine_window_visible())
+        ClipCursor(NULL);
 }
 
 
@@ -2662,7 +2745,7 @@ void macdrv_window_drag_begin(HWND hwnd, const macdrv_event *event)
     data->drag_event = drag_event;
     release_win_data(data);
 
-    if (!event->window_drag_begin.no_activate && can_activate_window(hwnd) && GetForegroundWindow() != hwnd)
+    if (!event->window_drag_begin.no_activate && can_window_become_foreground(hwnd) && GetForegroundWindow() != hwnd)
     {
         /* ask whether the window wants to be activated */
         LRESULT ma = SendMessageW(hwnd, WM_MOUSEACTIVATE, (WPARAM)GetAncestor(hwnd, GA_ROOT),
@@ -2979,6 +3062,8 @@ BOOL query_resize_size(HWND hwnd, macdrv_query *query)
 BOOL query_resize_start(HWND hwnd)
 {
     TRACE("hwnd %p\n", hwnd);
+
+    ClipCursor(NULL);
 
     sync_window_min_max_info(hwnd);
     SendMessageW(hwnd, WM_ENTERSIZEMOVE, 0, 0);

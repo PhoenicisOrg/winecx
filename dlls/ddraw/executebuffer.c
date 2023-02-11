@@ -31,17 +31,17 @@ WINE_DEFAULT_DEBUG_CHANNEL(ddraw);
  *****************************************************************************/
 
 static void _dump_executedata(const D3DEXECUTEDATA *lpData) {
-    TRACE("dwSize : %d\n", lpData->dwSize);
-    TRACE("Vertex      Offset : %d  Count  : %d\n", lpData->dwVertexOffset, lpData->dwVertexCount);
-    TRACE("Instruction Offset : %d  Length : %d\n", lpData->dwInstructionOffset, lpData->dwInstructionLength);
-    TRACE("HVertex     Offset : %d\n", lpData->dwHVertexOffset);
+    TRACE("dwSize : %lu\n", lpData->dwSize);
+    TRACE("Vertex      Offset : %lu  Count  : %lu\n", lpData->dwVertexOffset, lpData->dwVertexCount);
+    TRACE("Instruction Offset : %lu  Length : %lu\n", lpData->dwInstructionOffset, lpData->dwInstructionLength);
+    TRACE("HVertex     Offset : %lu\n", lpData->dwHVertexOffset);
 }
 
 static void _dump_D3DEXECUTEBUFFERDESC(const D3DEXECUTEBUFFERDESC *lpDesc) {
-    TRACE("dwSize       : %d\n", lpDesc->dwSize);
-    TRACE("dwFlags      : %x\n", lpDesc->dwFlags);
-    TRACE("dwCaps       : %x\n", lpDesc->dwCaps);
-    TRACE("dwBufferSize : %d\n", lpDesc->dwBufferSize);
+    TRACE("dwSize       : %lu\n", lpDesc->dwSize);
+    TRACE("dwFlags      : %#lx\n", lpDesc->dwFlags);
+    TRACE("dwCaps       : %#lx\n", lpDesc->dwCaps);
+    TRACE("dwBufferSize : %lu\n", lpDesc->dwBufferSize);
     TRACE("lpData       : %p\n", lpDesc->lpData);
 }
 
@@ -74,7 +74,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
             case D3DOP_POINT:
             {
                 const D3DPOINT *p = (D3DPOINT *)instr;
-                wined3d_device_set_primitive_type(device->wined3d_device, WINED3D_PT_POINTLIST, 0);
+                wined3d_device_context_set_primitive_type(device->immediate_context, WINED3D_PT_POINTLIST, 0);
                 wined3d_stateblock_set_stream_source(device->state, 0,
                         buffer->dst_vertex_buffer, 0, sizeof(D3DTLVERTEX));
                 wined3d_stateblock_set_vertex_declaration(device->state,
@@ -83,7 +83,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                 wined3d_device_apply_stateblock(device->wined3d_device, device->state);
                 d3d_device_sync_surfaces(device);
                 for (i = 0; i < count; ++i)
-                    wined3d_device_draw_primitive(device->wined3d_device, p[i].wFirst, p[i].wCount);
+                    wined3d_device_context_draw(device->immediate_context, p[i].wFirst, p[i].wCount, 0, 0);
 
                 instr += sizeof(*p) * count;
                 break;
@@ -91,7 +91,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
 
             case D3DOP_LINE:
                 primitive_size = 2;
-                wined3d_device_set_primitive_type(device->wined3d_device, WINED3D_PT_LINELIST, 0);
+                wined3d_device_context_set_primitive_type(device->immediate_context, WINED3D_PT_LINELIST, 0);
                 /* Drop through. */
             case D3DOP_TRIANGLE:
             {
@@ -104,7 +104,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
 
                 if (!primitive_size)
                 {
-                    wined3d_device_set_primitive_type(device->wined3d_device, WINED3D_PT_TRIANGLELIST, 0);
+                    wined3d_device_context_set_primitive_type(device->immediate_context, WINED3D_PT_TRIANGLELIST, 0);
                     primitive_size = 3;
                 }
 
@@ -191,7 +191,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                 wined3d_stateblock_set_index_buffer(device->state, buffer->index_buffer, WINED3DFMT_R16_UINT);
                 wined3d_device_apply_stateblock(device->wined3d_device, device->state);
                 d3d_device_sync_surfaces(device);
-                wined3d_device_draw_indexed_primitive(device->wined3d_device, index_pos, index_count);
+                wined3d_device_context_draw_indexed(device->immediate_context, 0, index_pos, index_count, 0, 0);
 
                 buffer->index_pos = index_pos + index_count;
                 break;
@@ -215,7 +215,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
 
                     if (!a || !b || !c)
                     {
-                        ERR("Invalid matrix handle (a %#x -> %p, b %#x -> %p, c %#x -> %p).\n",
+                        ERR("Invalid matrix handle (a %#lx -> %p, b %#lx -> %p, c %#lx -> %p).\n",
                                 ci->hDestMatrix, a, ci->hSrcMatrix1, b, ci->hSrcMatrix2, c);
                     }
                     else
@@ -238,7 +238,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                     m = ddraw_get_object(&device->handle_table, ci->u2.dwArg[0] - 1, DDRAW_HANDLE_MATRIX);
                     if (!m)
                     {
-                        ERR("Invalid matrix handle %#x.\n", ci->u2.dwArg[0]);
+                        ERR("Invalid matrix handle %#lx.\n", ci->u2.dwArg[0]);
                     }
                     else
                     {
@@ -292,7 +292,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                     D3DPROCESSVERTICES *ci = (D3DPROCESSVERTICES *)instr;
                     DWORD op = ci->dwFlags & D3DPROCESSVERTICES_OPMASK;
 
-                    TRACE("  start %u, dest %u, count %u, flags %#x.\n",
+                    TRACE("  start %u, dest %u, count %lu, flags %#lx.\n",
                             ci->wStart, ci->wDest, ci->dwCount, ci->dwFlags);
 
                     if (ci->dwFlags & D3DPROCESSVERTICES_UPDATEEXTENTS)
@@ -322,14 +322,14 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                             box.right = box.left + ci->dwCount * sizeof(D3DTLVERTEX);
                             box.top = box.front = 0;
                             box.bottom = box.back = 1;
-                            wined3d_device_copy_sub_resource_region(device->wined3d_device,
+                            wined3d_device_context_copy_sub_resource_region(device->immediate_context,
                                     wined3d_buffer_get_resource(buffer->dst_vertex_buffer), 0,
                                     ci->wDest * sizeof(D3DTLVERTEX), 0, 0,
                                     wined3d_buffer_get_resource(buffer->src_vertex_buffer), 0, &box, 0);
                             break;
 
                         default:
-                            FIXME("Unhandled vertex processing op %#x.\n", op);
+                            FIXME("Unhandled vertex processing op %#lx.\n", op);
                             break;
                     }
 
@@ -350,13 +350,13 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                     if (!(dst = ddraw_get_object(&device->handle_table,
                             ci->hDestTexture - 1, DDRAW_HANDLE_SURFACE)))
                     {
-                        WARN("Invalid destination texture handle %#x.\n", ci->hDestTexture);
+                        WARN("Invalid destination texture handle %#lx.\n", ci->hDestTexture);
                         continue;
                     }
                     if (!(src = ddraw_get_object(&device->handle_table,
                             ci->hSrcTexture - 1, DDRAW_HANDLE_SURFACE)))
                     {
-                        WARN("Invalid source texture handle %#x.\n", ci->hSrcTexture);
+                        WARN("Invalid source texture handle %#lx.\n", ci->hSrcTexture);
                         continue;
                     }
 
@@ -379,7 +379,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                     {
                         if (!ci->bNegate)
                         {
-                            TRACE(" Branch to %d\n", ci->dwOffset);
+                            TRACE(" Branch to %ld\n", ci->dwOffset);
                             if (ci->dwOffset) {
                                 instr = (char*)current + ci->dwOffset;
                                 break;
@@ -390,7 +390,7 @@ HRESULT d3d_execute_buffer_execute(struct d3d_execute_buffer *buffer, struct d3d
                     {
                         if (ci->bNegate)
                         {
-                            TRACE(" Branch to %d\n", ci->dwOffset);
+                            TRACE(" Branch to %ld\n", ci->dwOffset);
                             if (ci->dwOffset) {
                                 instr = (char*)current + ci->dwOffset;
                                 break;
@@ -464,7 +464,7 @@ static ULONG WINAPI d3d_execute_buffer_AddRef(IDirect3DExecuteBuffer *iface)
     struct d3d_execute_buffer *buffer = impl_from_IDirect3DExecuteBuffer(iface);
     ULONG ref = InterlockedIncrement(&buffer->ref);
 
-    TRACE("%p increasing refcount to %u.\n", buffer, ref);
+    TRACE("%p increasing refcount to %lu.\n", buffer, ref);
 
     return ref;
 }
@@ -483,7 +483,7 @@ static ULONG WINAPI d3d_execute_buffer_Release(IDirect3DExecuteBuffer *iface)
     struct d3d_execute_buffer *buffer = impl_from_IDirect3DExecuteBuffer(iface);
     ULONG ref = InterlockedDecrement(&buffer->ref);
 
-    TRACE("%p decreasing refcount to %u.\n", buffer, ref);
+    TRACE("%p decreasing refcount to %lu.\n", buffer, ref);
 
     if (!ref)
     {
@@ -593,7 +593,7 @@ static HRESULT WINAPI d3d_execute_buffer_SetExecuteData(IDirect3DExecuteBuffer *
 
     if (data->dwSize != sizeof(*data))
     {
-        WARN("data->dwSize is %u, returning DDERR_INVALIDPARAMS.\n", data->dwSize);
+        WARN("data->dwSize is %lu, returning DDERR_INVALIDPARAMS.\n", data->dwSize);
         return DDERR_INVALIDPARAMS;
     }
 
@@ -714,7 +714,7 @@ static HRESULT WINAPI d3d_execute_buffer_GetExecuteData(IDirect3DExecuteBuffer *
 static HRESULT WINAPI d3d_execute_buffer_Validate(IDirect3DExecuteBuffer *iface,
         DWORD *offset, LPD3DVALIDATECALLBACK callback, void *context, DWORD reserved)
 {
-    TRACE("iface %p, offset %p, callback %p, context %p, reserved %#x.\n",
+    TRACE("iface %p, offset %p, callback %p, context %p, reserved %#lx.\n",
             iface, offset, callback, context, reserved);
 
     WARN("Not implemented.\n");
@@ -737,7 +737,7 @@ static HRESULT WINAPI d3d_execute_buffer_Validate(IDirect3DExecuteBuffer *iface,
  *****************************************************************************/
 static HRESULT WINAPI d3d_execute_buffer_Optimize(IDirect3DExecuteBuffer *iface, DWORD reserved)
 {
-    TRACE("iface %p, reserved %#x.\n", iface, reserved);
+    TRACE("iface %p, reserved %#lx.\n", iface, reserved);
 
     WARN("Not implemented.\n");
 

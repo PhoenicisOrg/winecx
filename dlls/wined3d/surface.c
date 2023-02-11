@@ -26,14 +26,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
-#include "wine/port.h"
 #include "wined3d_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
-static const DWORD surface_simple_locations = WINED3D_LOCATION_SYSMEM | WINED3D_LOCATION_BUFFER;
+static const DWORD surface_simple_locations = WINED3D_LOCATION_SYSMEM
+        | WINED3D_LOCATION_BUFFER | WINED3D_LOCATION_CLEARED;
 
 /* Works correctly only for <= 4 bpp formats. */
 static void get_color_masks(const struct wined3d_format *format, uint32_t *masks)
@@ -355,7 +354,7 @@ static struct wined3d_texture *surface_convert_format(struct wined3d_texture *sr
     if (!wined3d_texture_load_location(src_texture, sub_resource_idx, context, map_binding))
         ERR("Failed to load the source sub-resource into %s.\n", wined3d_debug_location(map_binding));
     wined3d_texture_get_pitch(src_texture, texture_level, &src_row_pitch, &src_slice_pitch);
-    wined3d_texture_get_memory(src_texture, sub_resource_idx, &src_data, map_binding);
+    wined3d_texture_get_bo_address(src_texture, sub_resource_idx, &src_data, map_binding);
 
     if (conv)
     {
@@ -369,7 +368,7 @@ static struct wined3d_texture *surface_convert_format(struct wined3d_texture *sr
         if (!wined3d_texture_load_location(dst_texture, 0, context, map_binding))
             ERR("Failed to load the destination sub-resource into %s.\n", wined3d_debug_location(map_binding));
         wined3d_texture_get_pitch(dst_texture, 0, &dst_row_pitch, &dst_slice_pitch);
-        wined3d_texture_get_memory(dst_texture, 0, &dst_data, map_binding);
+        wined3d_texture_get_bo_address(dst_texture, 0, &dst_data, map_binding);
 
         src = wined3d_context_map_bo_address(context, &src_data,
                 src_texture->sub_resources[sub_resource_idx].size, WINED3D_MAP_READ);
@@ -419,10 +418,13 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     unsigned int restore_idx;
     BYTE *row, *top, *bottom;
     BOOL src_is_upside_down;
+    BYTE *mem = NULL;
+    uint8_t *offset;
     unsigned int i;
-    BYTE *mem;
 
-    wined3d_texture_get_memory(texture, sub_resource_idx, &data, dst_location);
+    /* dst_location was already prepared by the caller. */
+    wined3d_texture_get_bo_address(texture, sub_resource_idx, &data, dst_location);
+    offset = data.addr;
 
     restore_texture = context->current_rt.texture;
     restore_idx = context->current_rt.sub_resource_idx;
@@ -469,7 +471,13 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
 
     if (data.buffer_object)
     {
-        GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, ((struct wined3d_bo_gl *)data.buffer_object)->id));
+        GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, wined3d_bo_gl(data.buffer_object)->id));
+        checkGLcall("glBindBuffer");
+        offset += data.buffer_object->buffer_offset;
+    }
+    else
+    {
+        GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, 0));
         checkGLcall("glBindBuffer");
     }
 
@@ -484,7 +492,7 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     width = wined3d_texture_get_level_width(texture, level);
     height = wined3d_texture_get_level_height(texture, level);
     gl_info->gl_ops.gl.p_glReadPixels(0, 0, width, height,
-            format_gl->format, format_gl->type, data.addr);
+            format_gl->format, format_gl->type, offset);
     checkGLcall("glReadPixels");
 
     /* Reset previous pixel store pack state */
@@ -501,11 +509,10 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
 
         if (data.buffer_object)
         {
-            mem = ADDRSPACECAST(void*, GL_EXTCALL(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_WRITE)));
+            mem = GL_EXTCALL(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_WRITE));
             checkGLcall("glMapBuffer");
         }
-        else
-            mem = data.addr;
+        mem += (uintptr_t)offset;
 
         top = mem;
         bottom = mem + row_pitch * (height - 1);
@@ -527,7 +534,7 @@ error:
     if (data.buffer_object)
     {
         GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, 0));
-        wined3d_context_gl_reference_bo(context_gl, (struct wined3d_bo_gl *)data.buffer_object);
+        wined3d_context_gl_reference_bo(context_gl, wined3d_bo_gl(data.buffer_object));
         checkGLcall("glBindBuffer");
     }
 
@@ -757,7 +764,7 @@ static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int
             ERR("Failed to load the destination sub-resource into %s.\n", wined3d_debug_location(map_binding));
         wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~map_binding);
         wined3d_texture_get_pitch(dst_texture, texture_level, &dst_map.row_pitch, &dst_map.slice_pitch);
-        wined3d_texture_get_memory(dst_texture, dst_sub_resource_idx, &dst_data, map_binding);
+        wined3d_texture_get_bo_address(dst_texture, dst_sub_resource_idx, &dst_data, map_binding);
         dst_map.data = wined3d_context_map_bo_address(context, &dst_data,
                 dst_texture->sub_resources[dst_sub_resource_idx].size, WINED3D_MAP_READ | WINED3D_MAP_WRITE);
 
@@ -794,7 +801,7 @@ static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int
         if (!wined3d_texture_load_location(src_texture, src_sub_resource_idx, context, map_binding))
             ERR("Failed to load the source sub-resource into %s.\n", wined3d_debug_location(map_binding));
         wined3d_texture_get_pitch(src_texture, texture_level, &src_map.row_pitch, &src_map.slice_pitch);
-        wined3d_texture_get_memory(src_texture, src_sub_resource_idx, &src_data, map_binding);
+        wined3d_texture_get_bo_address(src_texture, src_sub_resource_idx, &src_data, map_binding);
         src_map.data = wined3d_context_map_bo_address(context, &src_data,
                 src_texture->sub_resources[src_sub_resource_idx].size, WINED3D_MAP_READ);
 
@@ -813,7 +820,7 @@ static HRESULT surface_cpu_blt(struct wined3d_texture *dst_texture, unsigned int
 
             wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~map_binding);
             wined3d_texture_get_pitch(dst_texture, texture_level, &dst_map.row_pitch, &dst_map.slice_pitch);
-            wined3d_texture_get_memory(dst_texture, dst_sub_resource_idx, &dst_data, map_binding);
+            wined3d_texture_get_bo_address(dst_texture, dst_sub_resource_idx, &dst_data, map_binding);
             dst_map.data = wined3d_context_map_bo_address(context, &dst_data,
                     dst_texture->sub_resources[dst_sub_resource_idx].size, WINED3D_MAP_WRITE);
         }
@@ -1281,7 +1288,7 @@ static void surface_cpu_blt_colour_fill(struct wined3d_rendertarget_view *view,
         ERR("Failed to load the sub-resource into %s.\n", wined3d_debug_location(map_binding));
     wined3d_texture_invalidate_location(texture, view->sub_resource_idx, ~map_binding);
     wined3d_texture_get_pitch(texture, level, &map.row_pitch, &map.slice_pitch);
-    wined3d_texture_get_memory(texture, view->sub_resource_idx, &data, map_binding);
+    wined3d_texture_get_bo_address(texture, view->sub_resource_idx, &data, map_binding);
     map.data = wined3d_context_map_bo_address(context, &data,
             texture->sub_resources[view->sub_resource_idx].size, WINED3D_MAP_WRITE);
     map.data = (BYTE *)map.data

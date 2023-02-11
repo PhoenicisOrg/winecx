@@ -26,9 +26,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
-#ifdef HAVE_UNISTD_H
-# include <unistd.h>
-#endif
+#include <unistd.h>
 
 #include <X11/Xlib.h>
 
@@ -441,7 +439,7 @@ static BOOL notify_owner( struct tray_icon *icon, UINT msg, LPARAM lparam )
     WPARAM wp = icon->id;
     LPARAM lp = msg;
 
-    if (icon->version >= NOTIFY_VERSION_4)
+    if (icon->version >= NOTIFYICON_VERSION_4)
     {
         POINT pt = { (short)LOWORD(lparam), (short)HIWORD(lparam) };
 
@@ -451,7 +449,7 @@ static BOOL notify_owner( struct tray_icon *icon, UINT msg, LPARAM lparam )
     }
 
     TRACE( "relaying 0x%x\n", msg );
-    if (!PostMessageW( icon->owner, icon->callback_message, wp, lp ) &&
+    if (!SendNotifyMessageW( icon->owner, icon->callback_message, wp, lp ) &&
         (GetLastError() == ERROR_INVALID_WINDOW_HANDLE))
     {
         WARN( "application window was destroyed, removing icon %u\n", icon->id );
