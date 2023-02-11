@@ -6227,7 +6227,7 @@ esac
 
 case $host in
   x86_64*|amd64*)
-    if test "x$enable_win64" != "xyes" -a "x$enable_win32on64" != "xyes" -a "$cross_compiling" != "yes"
+    if test "x$enable_win64" != "xyes" -a "x$enable_win32on64" != "xyes"
     then
       CC="$CC -m32"
       CXX="$CXX -m32"
@@ -19657,7 +19657,7 @@ then :
 fi
   fi
 
-    if test "x$enable_win64" != "xyes" -a "x$enable_win32on64" = "xyes" -a "$cross_compiling" != "yes"
+    if test "x$enable_win64" != "xyes" -a "x$enable_win32on64" = "xyes"
   then
       { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether the compiler supports -Werror=extra-tokens" >&5
 printf %s "checking whether the compiler supports -Werror=extra-tokens... " >&6; }
