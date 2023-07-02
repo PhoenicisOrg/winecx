@@ -605,7 +605,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
      * (It launches processes through rundll32.exe and already passes --no-sandbox)
      */
     /* CROSSOVER HACK: bug 19252
-     * Add --use-gl=swiftshader to Ubisoft Connect.
+     * Add --use-angle=gl to Ubisoft Connect.
      */
     /* CROSSOVER HACK: bug 20889
      * Add --in-process-gpu and --use-gl=swiftshader to qwSubprocess.exe, another
@@ -623,22 +623,27 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         static const WCHAR UplayW[] = {'U','p','l','a','y','W','e','b','C','o','r','e','.','e','x','e',0};
         static const WCHAR qwSubprocessW[] = {'q','w','S','u','b','p','r','o','c','e','s','s','.','e','x','e',0};
         static const WCHAR paradoxlauncherW[] = {'P','a','r','a','d','o','x',' ','L','a','u','n','c','h','e','r','.','e','x','e',0};
+        static const WCHAR wechatW[] = {'W','e','C','h','a','t','.','e','x','e',0};
 
         static const WCHAR inprocessgpuW[] = {' ','-','-','i','n','-','p','r','o','c','e','s','s','-','g','p','u',0};
         static const WCHAR nosandboxW[] = {' ','-','-','n','o','-','s','a','n','d','b','o','x',0};
         static const WCHAR swiftshaderW[] = {' ','-','-','u','s','e','-','g','l','=','s','w','i','f','t','s','h','a','d','e','r',0};
+        static const WCHAR angleglW[] = {' ','-','-','u','s','e','-','a','n','g','l','e','=','g','l',0};
+        static const WCHAR disablegpuW[] = {' ','-','-','d','i','s','a','b','l','e','-','g','p','u',0};
 
         if (wcsstr(app_name, steamwebhelperexeW) || wcsstr(app_name, socialclubhelperexeW) || wcsstr(app_name, foxmailW)
                 || wcsstr(app_name, BattlenetW) || (wcsstr(app_name, rundll32W) && wcsstr(tidy_cmdline, nosandboxW))
                 || wcsstr(app_name, UplayW)
                 || wcsstr(app_name, qwSubprocessW)
+                || wcsstr(app_name, wechatW)
                 || wcsstr(app_name, paradoxlauncherW)
            )
         {
             LPWSTR new_command_line;
 
             new_command_line = RtlAllocateHeap(GetProcessHeap(), 0,
-                sizeof(WCHAR) * (lstrlenW(tidy_cmdline) + lstrlenW(nosandboxW) +  lstrlenW(inprocessgpuW) + lstrlenW(swiftshaderW) + 1));
+                    sizeof(WCHAR) * (lstrlenW(tidy_cmdline) + lstrlenW(nosandboxW) +  lstrlenW(inprocessgpuW)
+                        + lstrlenW(swiftshaderW) + lstrlenW(angleglW) + lstrlenW(disablegpuW) + 1));
 
             if (!new_command_line) return FALSE;
 
@@ -647,10 +652,19 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
             lstrcatW(new_command_line, inprocessgpuW);
 
             if ((wcsstr(app_name, rundll32W) && wcsstr(tidy_cmdline, nosandboxW))
-                    || wcsstr(app_name, UplayW)
                     || wcsstr(app_name, qwSubprocessW))
             {
                 lstrcatW(new_command_line, swiftshaderW);
+            }
+
+            if (wcsstr(app_name, UplayW))
+            {
+                lstrcatW(new_command_line, angleglW);
+            }
+
+            if (wcsstr(app_name, steamwebhelperexeW))
+            {
+                lstrcatW(new_command_line, disablegpuW);
             }
 
             TRACE("CrossOver hack changing command line to %s\n", debugstr_w(new_command_line));
