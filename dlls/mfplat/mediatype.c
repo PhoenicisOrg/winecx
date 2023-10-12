@@ -21,9 +21,12 @@
 #include "mfplat_private.h"
 
 #include "dxva2api.h"
+#include "uuids.h"
 #include "initguid.h"
 #include "ks.h"
 #include "ksmedia.h"
+#include "amvideo.h"
+#include "wmcodecdsp.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(mfplat);
 
@@ -2629,7 +2632,7 @@ static int __cdecl uncompressed_video_format_compare(const void *a, const void *
 
 static const struct uncompressed_video_format video_formats[] =
 {
-    { &MFVideoFormat_RGB24,         4, 3, 1, 0 },
+    { &MFVideoFormat_RGB24,         3, 3, 1, 0 },
     { &MFVideoFormat_ARGB32,        4, 3, 1, 0 },
     { &MFVideoFormat_RGB32,         4, 3, 1, 0 },
     { &MFVideoFormat_RGB565,        2, 3, 1, 0 },
@@ -2644,13 +2647,20 @@ static const struct uncompressed_video_format video_formats[] =
     { &MFVideoFormat_IMC3,          2, 3, 0, 1 },
     { &MFVideoFormat_IMC4,          1, 0, 0, 1 },
     { &MFVideoFormat_IYUV,          1, 0, 0, 1 },
+    { &MFVideoFormat_NV11,          1, 0, 0, 1 },
     { &MFVideoFormat_NV12,          1, 0, 0, 1 },
     { &MFVideoFormat_D16,           2, 3, 0, 0 },
     { &MFVideoFormat_L16,           2, 3, 0, 0 },
     { &MFVideoFormat_UYVY,          2, 0, 0, 1 },
     { &MFVideoFormat_YUY2,          2, 0, 0, 1 },
     { &MFVideoFormat_YV12,          1, 0, 0, 1 },
+    { &MFVideoFormat_YVYU,          2, 0, 0, 1 },
     { &MFVideoFormat_A16B16G16R16F, 8, 3, 1, 0 },
+    { &MEDIASUBTYPE_RGB8,           1, 3, 1, 0 },
+    { &MEDIASUBTYPE_RGB565,         2, 3, 1, 0 },
+    { &MEDIASUBTYPE_RGB555,         2, 3, 1, 0 },
+    { &MEDIASUBTYPE_RGB24,          3, 3, 1, 0 },
+    { &MEDIASUBTYPE_RGB32,          4, 3, 1, 0 },
 };
 
 static struct uncompressed_video_format *mf_get_video_format(const GUID *subtype)
@@ -2730,6 +2740,9 @@ HRESULT WINAPI MFCalculateImageSize(REFGUID subtype, UINT32 width, UINT32 height
             /* 2 x 2 block, interleaving UV for half the height */
             *size = ((width + 1) & ~1) * height * 3 / 2;
             break;
+        case MAKEFOURCC('N','V','1','1'):
+            *size = ((width + 3) & ~3) * height * 3 / 2;
+            break;
         case D3DFMT_L8:
         case D3DFMT_L16:
         case D3DFMT_D16:
@@ -2770,6 +2783,7 @@ HRESULT WINAPI MFGetPlaneSize(DWORD fourcc, DWORD width, DWORD height, DWORD *si
         case MAKEFOURCC('Y','V','1','2'):
         case MAKEFOURCC('I','4','2','0'):
         case MAKEFOURCC('I','Y','U','V'):
+        case MAKEFOURCC('N','V','1','1'):
             *size = stride * height * 3 / 2;
             break;
         default:
@@ -2955,6 +2969,12 @@ static void mediatype_set_uint32(IMFMediaType *mediatype, const GUID *attr, unsi
 {
     if (SUCCEEDED(*hr))
         *hr = IMFMediaType_SetUINT32(mediatype, attr, value);
+}
+
+static void mediatype_set_uint64(IMFMediaType *mediatype, const GUID *attr, unsigned int high, unsigned int low, HRESULT *hr)
+{
+    if (SUCCEEDED(*hr))
+        *hr = IMFMediaType_SetUINT64(mediatype, attr, (UINT64)high << 32 | low);
 }
 
 static void mediatype_set_guid(IMFMediaType *mediatype, const GUID *attr, const GUID *value, HRESULT *hr)
@@ -3556,4 +3576,152 @@ HRESULT WINAPI MFInitVideoFormat_RGB(MFVIDEOFORMAT *format, DWORD width, DWORD h
     format->surfaceInfo.Format = d3dformat;
 
     return S_OK;
+}
+
+static HRESULT mf_get_stride_for_bitmap_info_header(DWORD fourcc, const BITMAPINFOHEADER *bih, LONG *stride)
+{
+    HRESULT hr;
+
+    if (FAILED(hr = MFGetStrideForBitmapInfoHeader(fourcc, bih->biWidth, stride))) return hr;
+    if (bih->biHeight < 0) *stride *= -1;
+
+    return hr;
+}
+
+static const GUID * get_mf_subtype_for_am_subtype(const GUID *subtype)
+{
+    static const GUID null;
+
+    if (IsEqualGUID(subtype, &MEDIASUBTYPE_RGB32))
+        return &MFVideoFormat_RGB32;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_ARGB32))
+        return &MFVideoFormat_ARGB32;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_I420))
+        return &MFVideoFormat_I420;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_AYUV))
+        return &MFVideoFormat_AYUV;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_YV12))
+        return &MFVideoFormat_YV12;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_YUY2))
+        return &MFVideoFormat_YUY2;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_UYVY))
+        return &MFVideoFormat_UYVY;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_YVYU))
+        return &MFVideoFormat_YVYU;
+    else if (IsEqualGUID(subtype, &MEDIASUBTYPE_NV12))
+        return &MFVideoFormat_NV12;
+    else
+    {
+        FIXME("Unknown subtype %s.\n", debugstr_guid(subtype));
+        return &null;
+    }
+}
+
+/***********************************************************************
+ *      MFCreateVideoMediaTypeFromVideoInfoHeader (mfplat.@)
+ */
+HRESULT WINAPI MFCreateVideoMediaTypeFromVideoInfoHeader(const KS_VIDEOINFOHEADER *vih, DWORD size, DWORD pixel_aspect_ratio_x,
+        DWORD pixel_aspect_ratio_y, MFVideoInterlaceMode interlace_mode, QWORD video_flags, const GUID *subtype,
+        IMFVideoMediaType **ret)
+{
+    FIXME("%p, %lu, %lu, %lu, %d, %I64x, %s, %p.\n", vih, size, pixel_aspect_ratio_x, pixel_aspect_ratio_y, interlace_mode,
+            video_flags, debugstr_guid(subtype), ret);
+
+    return E_NOTIMPL;
+}
+
+/***********************************************************************
+ *      MFInitMediaTypeFromVideoInfoHeader (mfplat.@)
+ */
+HRESULT WINAPI MFInitMediaTypeFromVideoInfoHeader(IMFMediaType *media_type, const VIDEOINFOHEADER *vih, UINT32 size,
+        const GUID *subtype)
+{
+    HRESULT hr = S_OK;
+    DWORD height;
+    LONG stride;
+
+    FIXME("%p, %p, %u, %s.\n", media_type, vih, size, debugstr_guid(subtype));
+
+    IMFMediaType_DeleteAllItems(media_type);
+
+    if (!subtype)
+    {
+        FIXME("Implicit subtype is not supported.\n");
+        return E_NOTIMPL;
+    }
+
+    height = abs(vih->bmiHeader.biHeight);
+
+    mediatype_set_guid(media_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video, &hr);
+    mediatype_set_guid(media_type, &MF_MT_SUBTYPE, subtype, &hr);
+    mediatype_set_uint64(media_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1, &hr);
+    mediatype_set_uint32(media_type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive, &hr);
+    mediatype_set_uint64(media_type, &MF_MT_FRAME_SIZE, vih->bmiHeader.biWidth, height, &hr);
+
+    if (SUCCEEDED(mf_get_stride_for_bitmap_info_header(subtype->Data1, &vih->bmiHeader, &stride)))
+    {
+        mediatype_set_uint32(media_type, &MF_MT_DEFAULT_STRIDE, stride, &hr);
+        mediatype_set_uint32(media_type, &MF_MT_SAMPLE_SIZE, abs(stride) * height, &hr);
+        mediatype_set_uint32(media_type, &MF_MT_FIXED_SIZE_SAMPLES, 1, &hr);
+        mediatype_set_uint32(media_type, &MF_MT_ALL_SAMPLES_INDEPENDENT, 1, &hr);
+    }
+
+    return hr;
+}
+
+/***********************************************************************
+ *      MFInitMediaTypeFromAMMediaType (mfplat.@)
+ */
+HRESULT WINAPI MFInitMediaTypeFromAMMediaType(IMFMediaType *media_type, const AM_MEDIA_TYPE *am_type)
+{
+    HRESULT hr = S_OK;
+
+    TRACE("%p, %p.\n", media_type, am_type);
+
+    IMFMediaType_DeleteAllItems(media_type);
+
+    if (IsEqualGUID(&am_type->majortype, &MEDIATYPE_Video))
+    {
+        if (IsEqualGUID(&am_type->formattype, &FORMAT_VideoInfo))
+        {
+            const VIDEOINFOHEADER *vih = (const VIDEOINFOHEADER *)am_type->pbFormat;
+            const GUID *subtype;
+            DWORD height;
+            LONG stride;
+
+            subtype = get_mf_subtype_for_am_subtype(&am_type->subtype);
+            height = abs(vih->bmiHeader.biHeight);
+
+            mediatype_set_guid(media_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video, &hr);
+            mediatype_set_guid(media_type, &MF_MT_SUBTYPE, subtype, &hr);
+            mediatype_set_uint64(media_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1, &hr);
+            mediatype_set_uint32(media_type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive, &hr);
+            mediatype_set_uint64(media_type, &MF_MT_FRAME_SIZE, vih->bmiHeader.biWidth, height, &hr);
+            mediatype_set_uint32(media_type, &MF_MT_ALL_SAMPLES_INDEPENDENT, 1, &hr);
+
+            if (SUCCEEDED(mf_get_stride_for_bitmap_info_header(subtype->Data1, &vih->bmiHeader, &stride)))
+            {
+                mediatype_set_uint32(media_type, &MF_MT_DEFAULT_STRIDE, stride, &hr);
+                mediatype_set_uint32(media_type, &MF_MT_SAMPLE_SIZE, abs(stride) * height, &hr);
+                mediatype_set_uint32(media_type, &MF_MT_FIXED_SIZE_SAMPLES, 1, &hr);
+            }
+            else
+            {
+                if (am_type->bFixedSizeSamples)
+                    mediatype_set_uint32(media_type, &MF_MT_FIXED_SIZE_SAMPLES, 1, &hr);
+                if (am_type->lSampleSize)
+                    mediatype_set_uint32(media_type, &MF_MT_SAMPLE_SIZE, am_type->lSampleSize, &hr);
+            }
+
+            return hr;
+        }
+        else
+        {
+            FIXME("Unsupported format type %s.\n", debugstr_guid(&am_type->formattype));
+        }
+    }
+    else
+        FIXME("Unsupported major type %s.\n", debugstr_guid(&am_type->majortype));
+
+    return E_NOTIMPL;
 }

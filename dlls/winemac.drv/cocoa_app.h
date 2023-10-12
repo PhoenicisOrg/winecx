@@ -128,6 +128,10 @@ enum {
 
     NSImage* applicationIcon;
 
+    /* CW Hack 22310 */
+    NSString *explicitAppUserModelID;
+    BOOL terminatingDueToAUMIDRequest;
+
     BOOL beenActive;
 
     NSMutableSet* windowsBeingDragged;
@@ -142,6 +146,7 @@ enum {
 @property (readonly, nonatomic) BOOL areDisplaysCaptured;
 @property (readonly, nonatomic) BOOL displaysTemporarilyUncapturedForDialog;
 @property (readonly, nonatomic) BOOL temporarilyIgnoreResignEventsForDialog;
+@property (nonatomic, copy) NSString *explicitAppUserModelID;  /* CW Hack 22310 */
 
 @property (readonly) BOOL clippingCursor;
 @property (nonatomic) NSTimeInterval lastSetCursorPositionTime;
@@ -149,6 +154,7 @@ enum {
     + (WineApplicationController*) sharedController;
 
     - (void) transformProcessToForeground:(BOOL)activateIfTransformed;
+    - (void) tryToActivateIgnoringOtherApps:(BOOL)ignore;
 
     - (BOOL) registerEventQueue:(WineEventQueue*)queue;
     - (void) unregisterEventQueue:(WineEventQueue*)queue;

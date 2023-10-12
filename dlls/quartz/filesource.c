@@ -18,9 +18,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#define NONAMELESSUNION
-#define NONAMELESSSTRUCT
-
 #include "quartz_private.h"
 
 #include "wine/debug.h"
@@ -214,7 +211,7 @@ BOOL get_media_type(const WCHAR *filename, GUID *majortype, GUID *subtype, GUID 
         }
     }
 
-    if ((file = CreateFileW(filename, GENERIC_READ, FILE_SHARE_READ, NULL,
+    if ((file = CreateFileW(filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
             OPEN_EXISTING, 0, NULL)) == INVALID_HANDLE_VALUE)
     {
         WARN("Failed to open file %s, error %lu.\n", debugstr_w(filename), GetLastError());
@@ -336,13 +333,14 @@ static void async_reader_destroy(struct strmbase_filter *iface)
             free(filter->requests);
         }
         CloseHandle(filter->file);
-        filter->sample_cs.DebugInfo->Spare[0] = 0;
-        DeleteCriticalSection(&filter->sample_cs);
         strmbase_source_cleanup(&filter->source);
 
         free(filter->pszFileName);
         FreeMediaType(&filter->mt);
     }
+
+    filter->sample_cs.DebugInfo->Spare[0] = 0;
+    DeleteCriticalSection(&filter->sample_cs);
 
     PostQueuedCompletionStatus(filter->port, 0, 1, NULL);
     WaitForSingleObject(filter->io_thread, INFINITE);
@@ -464,7 +462,7 @@ static HRESULT WINAPI FileSource_Load(IFileSourceFilter * iface, LPCOLESTR pszFi
 
     /* open file */
     /* FIXME: check the sharing values that native uses */
-    hFile = CreateFileW(pszFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+    hFile = CreateFileW(pszFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
 
     if (hFile == INVALID_HANDLE_VALUE)
     {
@@ -740,8 +738,8 @@ static HRESULT WINAPI FileAsyncReader_Request(IAsyncReader *iface, IMediaSample 
     assert(i < filter->max_requests);
     req = &filter->requests[i];
 
-    req->ovl.u.s.Offset = BYTES_FROM_MEDIATIME(start);
-    req->ovl.u.s.OffsetHigh = BYTES_FROM_MEDIATIME(start) >> 32;
+    req->ovl.Offset = BYTES_FROM_MEDIATIME(start);
+    req->ovl.OffsetHigh = BYTES_FROM_MEDIATIME(start) >> 32;
     /* No reference is taken. */
 
     if (ReadFile(filter->file, data, BYTES_FROM_MEDIATIME(end - start), NULL, &req->ovl)
@@ -789,7 +787,7 @@ static HRESULT WINAPI FileAsyncReader_WaitForNext(IAsyncReader *iface,
                 REFERENCE_TIME start, end;
 
                 IMediaSample_SetActualDataLength(req->sample, size);
-                start = MEDIATIME_FROM_BYTES(((ULONGLONG)req->ovl.u.s.OffsetHigh << 32) + req->ovl.u.s.Offset);
+                start = MEDIATIME_FROM_BYTES(((ULONGLONG)req->ovl.OffsetHigh << 32) + req->ovl.Offset);
                 end = start + MEDIATIME_FROM_BYTES(size);
                 IMediaSample_SetTime(req->sample, &start, &end);
 
@@ -814,8 +812,8 @@ static BOOL sync_read(HANDLE file, LONGLONG offset, LONG length, BYTE *buffer, D
     BOOL ret;
 
     ovl.hEvent = (HANDLE)((ULONG_PTR)CreateEventW(NULL, TRUE, FALSE, NULL) | 1);
-    ovl.u.s.Offset = (DWORD)offset;
-    ovl.u.s.OffsetHigh = offset >> 32;
+    ovl.Offset = (DWORD)offset;
+    ovl.OffsetHigh = offset >> 32;
 
     *read_len = 0;
 

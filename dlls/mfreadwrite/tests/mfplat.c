@@ -17,6 +17,7 @@
  */
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <string.h>
 
 #define COBJMACROS
@@ -105,6 +106,7 @@ struct test_media_stream
     IMFStreamDescriptor *sd;
     IMFMediaEventQueue *event_queue;
     BOOL is_new;
+    LONGLONG sample_duration, sample_time;
 };
 
 static struct test_media_stream *impl_from_IMFMediaStream(IMFMediaStream *iface)
@@ -211,8 +213,25 @@ static HRESULT WINAPI test_media_stream_RequestSample(IMFMediaStream *iface, IUn
 
     hr = MFCreateSample(&sample);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    hr = IMFSample_SetSampleTime(sample, 123);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (stream->sample_duration)
+    {
+        hr = IMFSample_SetSampleDuration(sample, stream->sample_duration);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IMFSample_SetSampleTime(sample, stream->sample_time);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        stream->sample_time += stream->sample_duration;
+    }
+    else
+    {
+        hr = IMFSample_SetSampleTime(sample, 123);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IMFSample_SetSampleDuration(sample, 1);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    }
+
     if (token)
         IMFSample_SetUnknown(sample, &MFSampleExtension_Token, token);
 
@@ -650,7 +669,7 @@ static struct async_callback *create_async_callback(void)
     return callback;
 }
 
-static void test_source_reader(void)
+static void test_source_reader(const char *filename, bool video)
 {
     IMFMediaType *mediatype, *mediatype2;
     DWORD stream_flags, actual_index;
@@ -671,16 +690,28 @@ static void test_source_reader(void)
         return;
     }
 
-    stream = get_resource_stream("test.wav");
+    winetest_push_context("%s", filename);
 
-    hr = MFCreateSourceReaderFromByteStream(stream, NULL, &reader);
+    stream = get_resource_stream(filename);
+
+    /* Create the source reader with video processing enabled. This allows
+     * outputting RGB formats. */
+    MFCreateAttributes(&attributes, 1);
+    hr = IMFAttributes_SetUINT32(attributes, &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = MFCreateSourceReaderFromByteStream(stream, attributes, &reader);
     if (FAILED(hr))
     {
         skip("MFCreateSourceReaderFromByteStream() failed, is G-Streamer missing?\n");
         IMFByteStream_Release(stream);
+        IMFAttributes_Release(attributes);
+        winetest_pop_context();
         return;
     }
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    IMFAttributes_Release(attributes);
 
     /* Access underlying media source object. */
     hr = IMFSourceReader_GetServiceForStream(reader, MF_SOURCE_READER_MEDIASOURCE, &GUID_NULL, &IID_IMFMediaSource,
@@ -689,8 +720,17 @@ static void test_source_reader(void)
     IMFMediaSource_Release(source);
 
     /* Stream selection. */
+    selected = FALSE;
     hr = IMFSourceReader_GetStreamSelection(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &selected);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    if (video)
+    {
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(selected, "Unexpected selection.\n");
+    }
+    else
+    {
+        ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    }
 
     hr = IMFSourceReader_GetStreamSelection(reader, 100, &selected);
     ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
@@ -706,7 +746,7 @@ static void test_source_reader(void)
     ok(selected, "Unexpected selection.\n");
 
     hr = IMFSourceReader_SetStreamSelection(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    ok(hr == (video ? S_OK : MF_E_INVALIDSTREAMNUMBER), "Unexpected hr %#lx.\n", hr);
 
     hr = IMFSourceReader_SetStreamSelection(reader, 100, TRUE);
     ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
@@ -729,7 +769,19 @@ static void test_source_reader(void)
 
     /* Native media type. */
     hr = IMFSourceReader_GetNativeMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &mediatype);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    if (video)
+    {
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFSourceReader_GetNativeMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &mediatype2);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(mediatype != mediatype2, "Unexpected media type instance.\n");
+        IMFMediaType_Release(mediatype2);
+        IMFMediaType_Release(mediatype);
+    }
+    else
+    {
+        ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    }
 
     hr = IMFSourceReader_GetNativeMediaType(reader, 100, 0, &mediatype);
     ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
@@ -751,7 +803,85 @@ static void test_source_reader(void)
 
     /* Current media type. */
     hr = IMFSourceReader_GetCurrentMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediatype);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    if (video)
+    {
+        GUID subtype;
+        UINT32 stride;
+        UINT64 framesize;
+
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IMFMediaType_GetGUID(mediatype, &MF_MT_SUBTYPE, &subtype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        todo_wine ok(IsEqualGUID(&subtype, &MFVideoFormat_H264), "Got subtype %s.\n", debugstr_guid(&subtype));
+
+        hr = IMFMediaType_GetUINT64(mediatype, &MF_MT_FRAME_SIZE, &framesize);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(framesize == ((UINT64)160 << 32 | 120), "Got frame size %ux%u.\n",
+                (unsigned int)(framesize >> 32), (unsigned int)framesize);
+
+        hr = IMFMediaType_GetUINT32(mediatype, &MF_MT_DEFAULT_STRIDE, &stride);
+        todo_wine ok(hr == MF_E_ATTRIBUTENOTFOUND, "Unexpected hr %#lx.\n", hr);
+
+        IMFMediaType_Release(mediatype);
+
+        /* Set the type to a YUV format. */
+
+        hr = MFCreateMediaType(&mediatype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFMediaType_SetGUID(mediatype, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFMediaType_SetGUID(mediatype, &MF_MT_SUBTYPE, &MFVideoFormat_NV12);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFSourceReader_SetCurrentMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, mediatype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IMFMediaType_Release(mediatype);
+
+        hr = IMFSourceReader_GetCurrentMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediatype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IMFMediaType_GetGUID(mediatype, &MF_MT_SUBTYPE, &subtype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(IsEqualGUID(&subtype, &MFVideoFormat_NV12), "Got subtype %s.\n", debugstr_guid(&subtype));
+
+        hr = IMFMediaType_GetUINT32(mediatype, &MF_MT_DEFAULT_STRIDE, &stride);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(stride == 160, "Got stride %u.\n", stride);
+
+        IMFMediaType_Release(mediatype);
+
+        /* Set the type to an RGB format. */
+
+        hr = MFCreateMediaType(&mediatype);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFMediaType_SetGUID(mediatype, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFMediaType_SetGUID(mediatype, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IMFSourceReader_SetCurrentMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, mediatype);
+        todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IMFMediaType_Release(mediatype);
+
+        if (hr == S_OK)
+        {
+            hr = IMFSourceReader_GetCurrentMediaType(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediatype);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+            hr = IMFMediaType_GetGUID(mediatype, &MF_MT_SUBTYPE, &subtype);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            ok(IsEqualGUID(&subtype, &MFVideoFormat_RGB32), "Got subtype %s.\n", debugstr_guid(&subtype));
+
+            hr = IMFMediaType_GetUINT32(mediatype, &MF_MT_DEFAULT_STRIDE, &stride);
+            todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            todo_wine ok(stride == 160 * 4, "Got stride %u.\n", stride);
+
+            IMFMediaType_Release(mediatype);
+        }
+    }
+    else
+    {
+        ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    }
 
     hr = IMFSourceReader_GetCurrentMediaType(reader, 100, &mediatype);
     ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
@@ -764,55 +894,64 @@ static void test_source_reader(void)
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     IMFMediaType_Release(mediatype);
 
-    hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &actual_index, &stream_flags,
-            &timestamp, &sample);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    if (hr != S_OK)
-        goto skip_read_sample;
-    ok(!actual_index, "Unexpected stream index %lu.\n", actual_index);
-    ok(!stream_flags, "Unexpected stream flags %#lx.\n", stream_flags);
-    IMFSample_Release(sample);
+    for (;;)
+    {
+        hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &actual_index, &stream_flags,
+                &timestamp, &sample);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        todo_wine_if (video) ok(!actual_index, "Unexpected stream index %lu.\n", actual_index);
+        ok(!(stream_flags & ~MF_SOURCE_READERF_ENDOFSTREAM), "Unexpected stream flags %#lx.\n", stream_flags);
 
-    /* There is no video stream. */
+        if (stream_flags & MF_SOURCE_READERF_ENDOFSTREAM)
+        {
+            ok(!sample, "Unexpected sample object.\n");
+            break;
+        }
+
+        IMFSample_Release(sample);
+    }
+
     hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &actual_index, &stream_flags,
             &timestamp, &sample);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
-    ok(actual_index == MF_SOURCE_READER_FIRST_VIDEO_STREAM, "Unexpected stream index %lu.\n", actual_index);
-    ok(stream_flags == MF_SOURCE_READERF_ERROR, "Unexpected stream flags %#lx.\n", stream_flags);
+    if (video)
+    {
+        for (;;)
+        {
+            hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                    0, &actual_index, &stream_flags, &timestamp, &sample);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            todo_wine ok(actual_index == 1, "Unexpected stream index %lu.\n", actual_index);
+            ok(!(stream_flags & ~MF_SOURCE_READERF_ENDOFSTREAM), "Unexpected stream flags %#lx.\n", stream_flags);
 
-    hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, &stream_flags, &timestamp,
-            &sample);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+            if (stream_flags & MF_SOURCE_READERF_ENDOFSTREAM)
+            {
+                ok(!sample, "Unexpected sample object.\n");
+                break;
+            }
+
+            IMFSample_Release(sample);
+        }
+    }
+    else
+    {
+        hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                0, &actual_index, &stream_flags, &timestamp, &sample);
+        ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+        ok(actual_index == MF_SOURCE_READER_FIRST_VIDEO_STREAM, "Unexpected stream index %lu.\n", actual_index);
+        ok(stream_flags == MF_SOURCE_READERF_ERROR, "Unexpected stream flags %#lx.\n", stream_flags);
+
+        hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                0, NULL, &stream_flags, &timestamp, &sample);
+        ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    }
 
     hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, NULL, &timestamp, &sample);
     ok(hr == E_POINTER, "Unexpected hr %#lx.\n", hr);
 
-    hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &actual_index, &stream_flags,
-            &timestamp, &sample);
-    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    ok(!actual_index, "Unexpected stream index %lu.\n", actual_index);
-    /* TODO: gstreamer outputs .wav sample in increments of 4096, instead of 4410 */
-    todo_wine
-{
-    ok(stream_flags == MF_SOURCE_READERF_ENDOFSTREAM, "Unexpected stream flags %#lx.\n", stream_flags);
-    ok(!sample, "Unexpected sample object.\n");
-}
-    if(!stream_flags)
-    {
-        IMFSample_Release(sample);
-
-        hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &actual_index, &stream_flags,
-                &timestamp, &sample);
-        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-        ok(!actual_index, "Unexpected stream index %lu.\n", actual_index);
-        ok(stream_flags == MF_SOURCE_READERF_ENDOFSTREAM, "Unexpected stream flags %#lx.\n", stream_flags);
-        ok(!sample, "Unexpected sample object.\n");
-    }
-
     hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_CONTROLF_DRAIN,
             &actual_index, &stream_flags, &timestamp, &sample);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    ok(actual_index == 0, "Unexpected stream index %lu\n", actual_index);
+    todo_wine_if (video) ok(actual_index == 0, "Unexpected stream index %lu.\n", actual_index);
     ok(stream_flags == MF_SOURCE_READERF_ENDOFSTREAM, "Unexpected stream flags %#lx.\n", stream_flags);
     ok(!sample, "Unexpected sample object.\n");
 
@@ -833,7 +972,7 @@ static void test_source_reader(void)
     hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_CONTROLF_DRAIN,
             &actual_index, &stream_flags, NULL, &sample);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    ok(!actual_index, "Unexpected stream index %lu\n", actual_index);
+    todo_wine_if (video) ok(!actual_index, "Unexpected stream index %lu.\n", actual_index);
     ok(stream_flags == MF_SOURCE_READERF_ENDOFSTREAM, "Unexpected stream flags %#lx.\n", stream_flags);
     ok(!sample, "Unexpected sample object.\n");
 
@@ -844,11 +983,9 @@ static void test_source_reader(void)
     ok(stream_flags == MF_SOURCE_READERF_ENDOFSTREAM, "Unexpected stream flags %#lx.\n", stream_flags);
     ok(!sample, "Unexpected sample object.\n");
 
-skip_read_sample:
-
     /* Flush. */
     hr = IMFSourceReader_Flush(reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-    ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
+    ok(hr == (video ? S_OK : MF_E_INVALIDSTREAMNUMBER), "Unexpected hr %#lx.\n", hr);
 
     hr = IMFSourceReader_Flush(reader, 100);
     ok(hr == MF_E_INVALIDSTREAMNUMBER, "Unexpected hr %#lx.\n", hr);
@@ -884,13 +1021,18 @@ skip_read_sample:
     IMFSourceReader_Release(reader);
 
     IMFByteStream_Release(stream);
+
+    winetest_pop_context();
 }
 
 static void test_source_reader_from_media_source(void)
 {
+    static const DWORD expected_sample_order[10] = {0, 0, 1, 1, 0, 0, 0, 0, 1, 0};
+
     struct async_callback *callback;
     IMFSourceReader *reader;
     IMFMediaSource *source;
+    struct test_source *test_source;
     IMFMediaType *media_type;
     HRESULT hr;
     DWORD actual_index, stream_flags;
@@ -963,6 +1105,19 @@ static void test_source_reader_from_media_source(void)
         ok(!!sample, "Expected sample object.\n");
         IMFSample_Release(sample);
     }
+
+    hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_ANY_STREAM, 0, &actual_index, &stream_flags,
+            &timestamp, &sample);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!stream_flags, "Unexpected stream flags %#lx.\n", stream_flags);
+    ok(timestamp == 123, "Unexpected timestamp.\n");
+    ok(!!sample, "Expected sample object.\n");
+
+    /* Once the last read sample of all streams has the same timestamp value, the reader will
+       continue reading from the first stream until its timestamp increases. */
+    ok(!actual_index, "%d: Unexpected stream index %lu.\n", TEST_SOURCE_NUM_STREAMS + 1, actual_index);
+
+    IMFSample_Release(sample);
 
     IMFSourceReader_Release(reader);
     IMFMediaSource_Release(source);
@@ -1172,6 +1327,38 @@ static void test_source_reader_from_media_source(void)
     IMFMediaSource_Release(source);
 
     fail_request_sample = FALSE;
+
+    /* MF_SOURCE_READER_ANY_STREAM with streams of different sample sizes */
+    source = create_test_source(2);
+    ok(!!source, "Failed to create test source.\n");
+
+    test_source = impl_from_IMFMediaSource(source);
+    test_source->streams[0]->sample_duration = 100000;
+    test_source->streams[1]->sample_duration = 400000;
+
+    hr = MFCreateSourceReaderFromMediaSource(source, NULL, &reader);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IMFSourceReader_SetStreamSelection(reader, 0, TRUE);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IMFSourceReader_SetStreamSelection(reader, 1, TRUE);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* The source reader picks the stream whose last sample had the lower timestamp */
+    for (i = 0; i < ARRAY_SIZE(expected_sample_order); i++)
+    {
+        hr = IMFSourceReader_ReadSample(reader, MF_SOURCE_READER_ANY_STREAM, 0, &actual_index, &stream_flags, &timestamp, &sample);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(!stream_flags, "Unexpected stream flags %#lx.\n", stream_flags);
+        ok(!!sample, "Expected sample object.\n");
+        ok (actual_index == expected_sample_order[i], "Got sample %u from unexpected stream %lu, expected %lu.\n",
+                i, actual_index, expected_sample_order[i]);
+        IMFSample_Release(sample);
+    }
+
+    IMFSourceReader_Release(reader);
+    IMFMediaSource_Release(source);
 }
 
 static void test_reader_d3d9(void)
@@ -1185,6 +1372,7 @@ static void test_reader_d3d9(void)
     HWND window;
     HRESULT hr;
     UINT token;
+    ULONG refcount;
 
     window = create_window();
     d3d9 = Direct3DCreate9(D3D_SDK_VERSION);
@@ -1217,12 +1405,113 @@ static void test_reader_d3d9(void)
 
     IMFSourceReader_Release(reader);
 
-    IDirect3DDeviceManager9_Release(d3d9_manager);
+    refcount = IDirect3DDeviceManager9_Release(d3d9_manager);
+    ok(!refcount, "Unexpected refcount %lu.\n", refcount);
+
     IDirect3DDevice9_Release(d3d9_device);
 
 done:
     IDirect3D9_Release(d3d9);
     DestroyWindow(window);
+}
+
+static void test_sink_writer_create(void)
+{
+    IMFSinkWriter *writer;
+    HRESULT hr;
+
+    hr = MFCreateSinkWriterFromURL(NULL, NULL, NULL, NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    writer = (void *)0xdeadbeef;
+    hr = MFCreateSinkWriterFromURL(NULL, NULL, NULL, &writer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(!writer, "Unexpected pointer %p.\n", writer);
+
+    hr = MFCreateSinkWriterFromMediaSink(NULL, NULL, NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    writer = (void *)0xdeadbeef;
+    hr = MFCreateSinkWriterFromMediaSink(NULL, NULL, &writer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(!writer, "Unexpected pointer %p.\n", writer);
+}
+
+static void test_sink_writer_mp4(void)
+{
+    WCHAR tmp_file[MAX_PATH];
+    IMFSinkWriter *writer;
+    IMFByteStream *stream;
+    IMFAttributes *attr;
+    IMFMediaSink *sink;
+    HRESULT hr;
+
+    GetTempPathW(ARRAY_SIZE(tmp_file), tmp_file);
+    wcscat(tmp_file, L"tmp.mp4");
+
+    hr = MFCreateAttributes(&attr, 1);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IMFAttributes_SetGUID(attr, &MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &stream);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* Test MFCreateSinkWriterFromURL. */
+    writer = (void *)0xdeadbeef;
+    hr = MFCreateSinkWriterFromURL(NULL, NULL, attr, &writer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(!writer, "Unexpected pointer %p.\n", writer);
+
+    writer = (void *)0xdeadbeef;
+    hr = MFCreateSinkWriterFromURL(NULL, stream, NULL, &writer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(!writer, "Unexpected pointer %p.\n", writer);
+
+    hr = MFCreateSinkWriterFromURL(NULL, stream, attr, &writer);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IMFSinkWriter_Release(writer);
+
+    hr = MFCreateSinkWriterFromURL(tmp_file, NULL, NULL, &writer);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IMFSinkWriter_Release(writer);
+
+    hr = MFCreateSinkWriterFromURL(tmp_file, NULL, attr, &writer);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IMFSinkWriter_Release(writer);
+
+    hr = MFCreateSinkWriterFromURL(tmp_file, stream, NULL, &writer);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IMFSinkWriter_Release(writer);
+
+    hr = MFCreateSinkWriterFromURL(tmp_file, stream, attr, &writer);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr != S_OK)
+    {
+        IMFByteStream_Release(stream);
+        IMFAttributes_Release(attr);
+        return;
+    }
+
+    /* Test GetServiceForStream. */
+    sink = (void *)0xdeadbeef;
+    hr = IMFSinkWriter_GetServiceForStream(writer, MF_SINK_WRITER_MEDIASINK,
+            &GUID_NULL, &IID_IMFMediaSink, (void **)&sink);
+    ok(hr == MF_E_UNSUPPORTED_SERVICE, "Unexpected hr %#lx.\n", hr);
+    ok(!sink, "Unexpected pointer %p.\n", sink);
+
+    DeleteFileW(tmp_file);
+    IMFSinkWriter_Release(writer);
+    IMFByteStream_Release(stream);
+    IMFAttributes_Release(attr);
 }
 
 START_TEST(mfplat)
@@ -1235,9 +1524,12 @@ START_TEST(mfplat)
     init_functions();
 
     test_factory();
-    test_source_reader();
+    test_source_reader("test.wav", false);
+    test_source_reader("test.mp4", true);
     test_source_reader_from_media_source();
     test_reader_d3d9();
+    test_sink_writer_create();
+    test_sink_writer_mp4();
 
     hr = MFShutdown();
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);

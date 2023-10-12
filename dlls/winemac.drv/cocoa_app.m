@@ -20,8 +20,6 @@
 
 #import <Carbon/Carbon.h>
 
-#include "wine/hostaddrspace_enter.h"
-
 #import "cocoa_app.h"
 #import "cocoa_cursorclipping.h"
 #import "cocoa_event.h"
@@ -38,6 +36,22 @@ static NSString* const WineDidShowPermissionDialogNotification = @"WineDidShowPe
 static NSString* const NSWindowWillStartDraggingNotification = @"NSWindowWillStartDraggingNotification";
 static NSString* const NSWindowDidEndDraggingNotification = @"NSWindowDidEndDraggingNotification";
 
+/* CW Hack 22310 */
+// WineAppUserModelIDQuitRequestNotification is sent on the distributed notification center when an
+// app with an AUMID is quit via Cocoa. Any app in the same prefix with a corresponding AUMID should
+// also quit.
+static NSString* const WineAppUserModelIDQuitRequestNotification = @"WineAppUserModelIDQuitRequestNotification";
+static NSString* const WineAUMIDQuitNotificationAUMIDKey = @"AUMID";
+static NSString* const WineAUMIDQuitNotificationSourcePIDKey = @"SourcePID";
+static NSString* const WineAUMIDQuitNotificationWineConfigDirKey = @"WineConfigDir";
+static NSString* const WineAUMIDQuitNotificationWinePrefixKey = @"WinePrefix";
+
+// Internal distributed notification to handle cooperative app activation in Sonoma.
+static NSString* const WineAppWillActivateNotification = @"WineAppWillActivateNotification";
+static NSString* const WineActivatingAppPIDKey = @"ActivatingAppPID";
+static NSString* const WineActivatingAppPrefixKey = @"ActivatingAppPrefix";
+static NSString* const WineActivatingAppConfigDirKey = @"ActivatingAppConfigDir";
+
 
 int macdrv_err_on;
 
@@ -46,6 +60,24 @@ int macdrv_err_on;
 @interface NSWindow (WineAutoTabbingExtensions)
 
     + (void) setAllowsAutomaticWindowTabbing:(BOOL)allows;
+
+@end
+#endif
+
+
+#if !defined(MAC_OS_VERSION_14_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_14_0
+@interface NSApplication (CooperativeActivationSelectorsForOldSDKs)
+
+    - (void)activate;
+    - (void)yieldActivationToApplication:(NSRunningApplication *)application;
+    - (void)yieldActivationToApplicationWithBundleIdentifier:(NSString *)bundleIdentifier;
+
+@end
+
+@interface NSRunningApplication (CooperativeActivationSelectorsForOldSDKs)
+
+    - (BOOL)activateFromApplication:(NSRunningApplication *)application
+                            options:(NSApplicationActivationOptions)options;
 
 @end
 #endif
@@ -97,6 +129,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) setupObservations;
     - (void) applicationDidBecomeActive:(NSNotification *)notification;
+    - (void) handleApplicationShouldTerminateReply:(BOOL)reply;  /* CW Hack 22310 */
 
     static void PerformRequest(void *info);
 
@@ -111,6 +144,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
     @synthesize cursorFrames, cursorTimer, cursor;
     @synthesize mouseCaptureWindow;
     @synthesize lastSetCursorPositionTime;
+    @synthesize explicitAppUserModelID;  /* CW Hack 22310 */
 
     + (void) initialize
     {
@@ -288,7 +322,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
             if (activateIfTransformed)
-                [NSApp activateIgnoringOtherApps:YES];
+                [self tryToActivateIgnoringOtherApps:YES];
 
 #if defined(MAC_OS_X_VERSION_10_9) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_9
             if (!enable_app_nap && [NSProcessInfo instancesRespondToSelector:@selector(beginActivityWithOptions:reason:)])
@@ -719,17 +753,23 @@ static NSString* WineLocalizedString(unsigned int stringID)
             {
                 [window setLevel:newLevel];
 
-                // -setLevel: puts the window at the front of its new level.  If
-                // we decreased the level, that's good (it was in front of that
-                // level before, so it should still be now).  But if we increased
-                // the level, the window should be toward the back (but still
-                // ahead of the previous windows we did this to).
                 if (origLevel < newLevel)
                 {
+                    // If we increased the level, the window should be toward the
+                    // back of its new level (but still ahead of the previous
+                    // windows we did this to).
                     if (prev)
                         [window orderWindow:NSWindowAbove relativeTo:[prev windowNumber]];
                     else
                         [window orderBack:nil];
+                }
+                else
+                {
+                    // If we decreased the level, we want the window at the top
+                    // of its new level. -setLevel: is documented to do that on
+                    // its own, but that's buggy on Ventura. Since we're looping
+                    // back-to-front here, -orderFront: will do the right thing.
+                    [window orderFront:nil];
                 }
             }
 
@@ -846,13 +886,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
         if (CGDisplayModeGetWidth(mode1) != CGDisplayModeGetWidth(mode2)) return FALSE;
         if (CGDisplayModeGetHeight(mode1) != CGDisplayModeGetHeight(mode2)) return FALSE;
-
-#if defined(MAC_OS_X_VERSION_10_8) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
-        if (&CGDisplayModeGetPixelWidth != NULL &&
-            CGDisplayModeGetPixelWidth(mode1) != CGDisplayModeGetPixelWidth(mode2)) return FALSE;
-        if (&CGDisplayModeGetPixelHeight != NULL &&
-            CGDisplayModeGetPixelHeight(mode1) != CGDisplayModeGetPixelHeight(mode2)) return FALSE;
-#endif
+        if (CGDisplayModeGetPixelWidth(mode1) != CGDisplayModeGetPixelWidth(mode2)) return FALSE;
+        if (CGDisplayModeGetPixelHeight(mode1) != CGDisplayModeGetPixelHeight(mode2)) return FALSE;
 
         encoding1 = [(NSString*)CGDisplayModeCopyPixelEncoding(mode1) autorelease];
         encoding2 = [(NSString*)CGDisplayModeCopyPixelEncoding(mode2) autorelease];
@@ -877,12 +912,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
     - (NSArray*)modesMatchingMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID
     {
         NSMutableArray* ret = [NSMutableArray array];
-        NSDictionary* options = nil;
-
-#if defined(MAC_OS_X_VERSION_10_8) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
-        options = [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:TRUE]
-                                              forKey:(NSString*)kCGDisplayShowDuplicateLowResolutionModes];
-#endif
+        NSDictionary* options = @{ (NSString*)kCGDisplayShowDuplicateLowResolutionModes: @YES };
 
         NSArray *modes = [(NSArray*)CGDisplayCopyAllDisplayModes(displayID, (CFDictionaryRef)options) autorelease];
         for (id candidateModeObject in modes)
@@ -1274,7 +1304,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             [eventQueuesLock lock];
             for (queue in eventQueues)
             {
-                [queue discardEventsMatchingMask:event_mask_for_type(MOUSE_MOVED) |
+                [queue discardEventsMatchingMask:event_mask_for_type(MOUSE_MOVED_RELATIVE) |
                                                  event_mask_for_type(MOUSE_MOVED_ABSOLUTE)
                                        forWindow:nil];
                 [queue resetMouseEventPositions:pos];
@@ -1540,7 +1570,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 mouseMoveDeltaX += [anEvent deltaX];
                 mouseMoveDeltaY += [anEvent deltaY];
 
-                event = macdrv_create_event(MOUSE_MOVED, targetWindow);
+                event = macdrv_create_event(MOUSE_MOVED_RELATIVE, targetWindow);
                 event->mouse_moved.x = mouseMoveDeltaX * scale;
                 event->mouse_moved.y = mouseMoveDeltaY * scale;
 
@@ -2059,6 +2089,23 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     name:(NSString*)kTISNotifyEnabledKeyboardInputSourcesChanged
                   object:nil];
 
+        if ([NSApplication instancesRespondToSelector:@selector(yieldActivationToApplication:)])
+        {
+            /* App activation cooperation, starting in macOS 14 Sonoma. */
+            [dnc addObserver:self
+                    selector:@selector(otherWineAppWillActivate:)
+                        name:WineAppWillActivateNotification
+                      object:nil
+          suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+        }
+
+        /* CW Hack 22310 */
+        [dnc addObserver:self
+                selector:@selector(handleAppUserModelIDQuitRequest:)
+                    name:WineAppUserModelIDQuitRequestNotification
+                  object:nil
+      suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+
         [nc addObserverForName:WineWillShowPermissionDialogNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
@@ -2106,6 +2153,163 @@ static NSString* WineLocalizedString(unsigned int stringID)
             temporarilyIgnoreResignEventsForDialog = FALSE;
         }];
     }
+
+    /* CW Hack 22310 */
+    - (void) handleAppUserModelIDQuitRequest:(NSNotification *)notification
+    {
+        NSString *aumid;
+        pid_t sourcePID;
+        NSProcessInfo *ourProcess;
+        NSString *ourConfigDir, *otherConfigDir, *ourPrefix, *otherPrefix;
+
+        if (!self.explicitAppUserModelID.length) return;
+
+        sourcePID = [notification.userInfo[WineAUMIDQuitNotificationAUMIDKey] intValue];
+        ourProcess = [NSProcessInfo processInfo];
+
+        // Ignore requests from ourself
+        if (sourcePID == ourProcess.processIdentifier) return;
+
+        aumid = notification.userInfo[WineAUMIDQuitNotificationAUMIDKey];
+        if (![self.explicitAppUserModelID isEqualToString:aumid]) return;
+
+        // AUMID matches. Make sure it's from the same prefix.
+        ourConfigDir = ourProcess.environment[@"WINECONFIGDIR"];
+        otherConfigDir = notification.userInfo[WineAUMIDQuitNotificationWineConfigDirKey];
+        if (ourConfigDir.length && otherConfigDir.length &&
+            ![ourConfigDir isEqualToString:otherConfigDir])
+        {
+            return;
+        }
+
+        ourPrefix = ourProcess.environment[@"WINEPREFIX"];
+        otherPrefix = notification.userInfo[WineAUMIDQuitNotificationWinePrefixKey];
+        if (ourPrefix.length && otherPrefix.length &&
+            ![ourPrefix isEqualToString:otherPrefix])
+        {
+            return;
+        }
+
+        terminatingDueToAUMIDRequest = YES;
+        [NSApp terminate:NSApp];
+    }
+
+    /* CW Hack 22310 */
+    - (void) postAppUserModelIDQuitRequest
+    {
+        NSDictionary *userInfo;
+        NSProcessInfo *process;
+        NSString *wineConfigDir, *winePrefix;
+
+        if (!self.explicitAppUserModelID.length) return;
+
+        /* temporarily only supporting this for Steam */
+        if (![self.explicitAppUserModelID isEqualToString:@"Valve.Steam.Client"]) return;
+
+        process = [NSProcessInfo processInfo];
+        wineConfigDir = process.environment[@"WINECONFIGDIR"];
+        if (!wineConfigDir) wineConfigDir = @"";
+        winePrefix = process.environment[@"WINEPREFIX"];
+        if (!winePrefix) winePrefix = @"";
+
+        userInfo = @{
+            WineAUMIDQuitNotificationAUMIDKey: self.explicitAppUserModelID,
+            WineAUMIDQuitNotificationSourcePIDKey: @([NSProcessInfo processInfo].processIdentifier),
+            WineAUMIDQuitNotificationWineConfigDirKey: wineConfigDir,
+            WineAUMIDQuitNotificationWinePrefixKey: winePrefix
+        };
+
+        [[NSDistributedNotificationCenter defaultCenter]
+            postNotificationName:WineAppUserModelIDQuitRequestNotification
+                          object:nil
+                        userInfo:userInfo
+              deliverImmediately:YES];
+    }
+
+    - (void) otherWineAppWillActivate:(NSNotification *)note
+    {
+        NSProcessInfo *ourProcess;
+        pid_t otherPID;
+        NSString *ourConfigDir, *otherConfigDir, *ourPrefix, *otherPrefix;
+        NSRunningApplication *otherApp;
+
+        /* No point in yielding if we're not the foreground app. */
+        if (![NSApp isActive]) return;
+
+        /* Ignore requests from ourself, dead processes, and other prefixes. */
+        ourProcess = [NSProcessInfo processInfo];
+        otherPID = [note.userInfo[WineActivatingAppPIDKey] integerValue];
+        if (otherPID == ourProcess.processIdentifier) return;
+
+        otherApp = [NSRunningApplication runningApplicationWithProcessIdentifier:otherPID];
+        if (!otherApp) return;
+
+        ourConfigDir = ourProcess.environment[@"WINECONFIGDIR"];
+        otherConfigDir = note.userInfo[WineActivatingAppConfigDirKey];
+        if (ourConfigDir.length && otherConfigDir.length &&
+            ![ourConfigDir isEqualToString:otherConfigDir])
+        {
+            return;
+        }
+
+        ourPrefix = ourProcess.environment[@"WINEPREFIX"];
+        otherPrefix = note.userInfo[WineActivatingAppPrefixKey];
+        if (ourPrefix.length && otherPrefix.length &&
+            ![ourPrefix isEqualToString:otherPrefix])
+        {
+            return;
+        }
+
+        /* There's a race condition here. The requesting app sends out
+           WineAppWillActivateNotification and then activates itself, but since
+           distributed notifications are asynchronous, we may not have yielded
+           in time. So we call activateFromApplication: on the other app here,
+           which will work around that race if it happened. If we didn't hit the
+           race, the activateFromApplication: call will be a no-op. */
+
+        /* We only add this observer if NSApplication responds to the yield
+           methods, so they're safe to call without checking here. */
+        [NSApp yieldActivationToApplication:otherApp];
+        [otherApp activateFromApplication:[NSRunningApplication currentApplication]
+                                  options:0];
+    }
+
+    - (void) tryToActivateIgnoringOtherApps:(BOOL)ignore
+    {
+        NSProcessInfo *processInfo;
+        NSString *configDir, *prefix;
+        NSDictionary *userInfo;
+
+        if ([NSApp isActive]) return;  /* Nothing to do. */
+
+        if (!ignore ||
+            ![NSApplication instancesRespondToSelector:@selector(yieldActivationToApplication:)])
+        {
+            /* Either we don't need to force activation, or the OS is old enough
+               that this is our only option. */
+            [NSApp activateIgnoringOtherApps:ignore];
+            return;
+        }
+
+        /* Ask other Wine apps to yield activation to us. */
+        processInfo = [NSProcessInfo processInfo];
+        configDir = processInfo.environment[@"WINECONFIGDIR"];
+        prefix = processInfo.environment[@"WINEPREFIX"];
+        userInfo = @{
+            WineActivatingAppPIDKey: @(processInfo.processIdentifier),
+            WineActivatingAppPrefixKey: prefix ? prefix : @"",
+            WineActivatingAppConfigDirKey: configDir ? configDir : @""
+        };
+
+        [[NSDistributedNotificationCenter defaultCenter]
+            postNotificationName:WineAppWillActivateNotification
+                          object:nil
+                        userInfo:userInfo
+              deliverImmediately:YES];
+
+        /* This is racy. See the note in otherWineAppWillActivate:. */
+        [NSApp activate];
+     }
 
     - (BOOL) inputSourceIsInputMethod
     {
@@ -2303,6 +2507,22 @@ static NSString* WineLocalizedString(unsigned int stringID)
         macdrv_release_event(event);
 
         return ret;
+    }
+
+    /* CW Hack 22310 */
+    - (void)handleApplicationShouldTerminateReply:(BOOL)reply
+    {
+        if (reply && !terminatingDueToAUMIDRequest)
+        {
+            // Normal Cocoa-initiated quit, so tell everyone else with our AUMID
+            // to quit as well.
+            [self postAppUserModelIDQuitRequest];
+        }
+
+        if (!reply)
+            terminatingDueToAUMIDRequest = NO;
+
+        [NSApp replyToApplicationShouldTerminate:reply];
     }
 
     - (void)applicationWillBecomeActive:(NSNotification *)notification
@@ -2640,7 +2860,9 @@ void macdrv_set_application_icon(CFArrayRef images, CFURLRef urlRef)
 void macdrv_quit_reply(int reply)
 {
     OnMainThread(^{
-        [NSApp replyToApplicationShouldTerminate:reply];
+        /* CW Hack 22310 - route this through the app controller for
+           app user model ID handling. */
+        [[WineApplicationController sharedController] handleApplicationShouldTerminateReply:reply];
     });
 }
 
@@ -2748,4 +2970,52 @@ int macdrv_is_any_wine_window_visible(void)
     });
 
     return ret;
+}
+
+/* CW Hack 22310 */
+int macdrv_set_current_process_explicit_app_user_model_id(const UniChar *aumid, size_t length)
+{
+    NSString *str_aumid;
+
+    if (!aumid) return FALSE;
+
+    str_aumid = [NSString stringWithCharacters:aumid length:length];
+    if (!str_aumid) return FALSE;
+
+    OnMainThread(^{
+        [WineApplicationController sharedController].explicitAppUserModelID = str_aumid;
+    });
+
+    return TRUE;
+}
+
+/* CW Hack 22310 */
+int macdrv_get_current_process_explicit_app_user_model_id(UniChar *buffer, size_t size)
+{
+    __block NSString *aumid;
+
+    if (!buffer) return FALSE;
+
+    OnMainThread(^{
+        aumid = [[WineApplicationController sharedController].explicitAppUserModelID copy];
+    });
+
+    if (!aumid || aumid.length == 0)
+    {
+        /* Return empty string if there's no AUMID. */
+        if (size > 0) buffer[0] = '\0';
+        [aumid release];
+        return TRUE;
+    }
+
+    if (aumid.length + 1 > size)
+    {
+        [aumid release];
+        return FALSE;
+    }
+
+    [aumid getCharacters:buffer range:NSMakeRange(0, aumid.length)];
+    buffer[aumid.length] = '\0';
+    [aumid release];
+    return TRUE;
 }

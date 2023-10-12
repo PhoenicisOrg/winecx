@@ -151,8 +151,9 @@ INT WINAPI KERNELBASE_lstrlenA( LPCSTR str )
 {
     INT ret;
 
-    /* CX HACK 21207: Avoid exceptions with lstrlen(NULL) */
-    if (!str) return 0;
+    /* CX HACK 22631: Avoid the exception here for Quicken. */
+    if (!str)
+        return 0;
 
     __TRY
     {
@@ -171,8 +172,9 @@ INT WINAPI KERNELBASE_lstrlenW( LPCWSTR str )
 {
     INT ret;
 
-    /* CX HACK 21207: Avoid exceptions with lstrlen(NULL) */
-    if (!str) return 0;
+    /* CX HACK 22631: Avoid the exception here for Quicken. */
+    if (!str)
+        return 0;
 
     __TRY
     {
