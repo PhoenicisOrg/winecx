@@ -1329,12 +1329,11 @@ static BOOL init_gl_info(void)
 }
 
 
-static int get_dc_pixel_format(HDC hdc)
+static int get_dc_pixel_format(HWND hwnd, HDC hdc)
 {
     int format;
-    HWND hwnd;
 
-    if ((hwnd = NtUserWindowFromDC(hdc)))
+    if (hwnd)
     {
         struct macdrv_win_data *data;
 
@@ -1526,7 +1525,7 @@ static BOOL create_context(struct wgl_context *context, CGLContextObj share, uns
  *
  * Implementation of wglSetPixelFormat and wglSetPixelFormatWINE.
  */
-static BOOL set_pixel_format(HDC hdc, int fmt, BOOL allow_reset)
+static BOOL set_pixel_format(HDC hdc, int fmt, BOOL internal)
 {
     struct macdrv_win_data *data;
     const pixel_format *pf;
@@ -1541,16 +1540,19 @@ static BOOL set_pixel_format(HDC hdc, int fmt, BOOL allow_reset)
         return FALSE;
     }
 
+    if (!internal)
+    {
+        /* cannot change it if already set */
+        int prev = win32u_get_window_pixel_format( hwnd );
+
+        if (prev)
+            return prev == fmt;
+    }
+
     if (!(data = get_win_data(hwnd)))
     {
         FIXME("DC for window %p of other process: not implemented\n", hwnd);
         return FALSE;
-    }
-
-    if (!allow_reset && data->pixel_format)  /* cannot change it if already set */
-    {
-        ret = (data->pixel_format == fmt);
-        goto done;
     }
 
     /* Check if fmt is in our list of supported formats to see if it is supported. */
@@ -1588,7 +1590,8 @@ static BOOL set_pixel_format(HDC hdc, int fmt, BOOL allow_reset)
 
 done:
     release_win_data(data);
-    if (ret && gl_surface_mode == GL_SURFACE_BEHIND) NtUserSetWindowPixelFormat(hwnd, fmt);
+    if (ret && gl_surface_mode == GL_SURFACE_BEHIND)
+        win32u_set_window_pixel_format(hwnd, fmt, internal);
     return ret;
 }
 
@@ -2700,6 +2703,19 @@ cant_match:
     return TRUE;
 }
 
+/* CX HACK 23422 */
+static int is_tomb_raider_remastered(void)
+{
+    static const WCHAR tomb123_exeW[] = {'t','o','m','b','1','2','3','.','e','x','e',0};
+    WCHAR *name, *module_exe;
+
+    name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    module_exe = wcsrchr(name, '\\');
+    module_exe = module_exe ? module_exe + 1 : name;
+
+    return !wcsicmp(module_exe, tomb123_exeW);
+}
+
 
 /***********************************************************************
  *              macdrv_wglCreateContextAttribsARB
@@ -2719,7 +2735,7 @@ static struct wgl_context *macdrv_wglCreateContextAttribsARB(HDC hdc,
 
     TRACE("hdc %p, share_context %p, attrib_list %p\n", hdc, share_context, attrib_list);
 
-    format = get_dc_pixel_format(hdc);
+    format = get_dc_pixel_format(NtUserWindowFromDC(hdc), hdc);
 
     if (!is_valid_pixel_format(format))
     {
@@ -2818,9 +2834,20 @@ static struct wgl_context *macdrv_wglCreateContextAttribsARB(HDC hdc,
         }
     }
 
+
     if ((major == 3 && (minor == 2 || minor == 3)) ||
         (major == 4 && (minor == 0 || minor == 1)))
     {
+        /* CX HACK 23422:
+         * Tomb Raider 1-3 Remastered requests a non-forward-compatible 3.2 core context, but works
+         * with a forward-compatible context.
+         */
+        if (is_tomb_raider_remastered())
+        {
+            if (!(flags & WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB))
+                flags |= WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB;
+        }
+
         if (!(flags & WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB))
         {
             WARN("OS X only supports forward-compatible 3.2+ contexts\n");
@@ -4109,6 +4136,95 @@ static BOOL macdrv_wglSwapIntervalEXT(int interval)
     return TRUE;
 }
 
+/* CX HACK 23422 - START
+ * Tomb Raider 1-3 Remastered uses BC7 compressed textures in Remastered mode.
+ *
+ * Credit to nastys
+ */
+
+#define BCDEC_IMPLEMENTATION
+#define BCDEC_STATIC
+#include "opengl_bcdec.h"
+
+static void (*pglCompressedTexImage3D)(GLenum target, GLint level, GLenum internalformat,
+                                       GLsizei width, GLsizei height, GLsizei depth, GLint border,
+                                       GLsizei imageSize, const void *data);
+
+static void (*pglCompressedTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                                          GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                                          GLenum format, GLsizei imageSize, const void *data);
+
+static void *decode_bptc_unorm_to_rgba(const void *data, GLsizei width, GLsizei height, GLsizei depth)
+{
+    GLsizei numBlocksX = (width + 3) / 4;
+    GLsizei numBlocksY = (height + 3) / 4;
+    GLsizei numBlocksZ = (depth + 3) / 4;
+    char *pixels;
+
+    if (!data)
+        return NULL;
+
+    pixels = malloc(width * height * depth * 4);
+
+    for (GLsizei z = 0; z < numBlocksZ; z++)
+    {
+        for (GLsizei y = 0; y < numBlocksY; y++)
+        {
+            for (GLsizei x = 0; x < numBlocksX; x++)
+            {
+                GLsizei blockOffsetX = x * 4;
+                GLsizei blockOffsetY = y * 4;
+                GLsizei blockOffsetZ = z;
+                GLsizei blockOffset = blockOffsetZ * numBlocksX * numBlocksY * 4 + blockOffsetY * numBlocksX * 4 + blockOffsetX * 4;
+
+                GLsizei pixelOffsetX = x * 4;
+                GLsizei pixelOffsetY = y * 4;
+                GLsizei pixelOffsetZ = z * width * height * 4;
+                GLsizei pixelOffset = pixelOffsetZ + pixelOffsetY * width * 4 + pixelOffsetX * 4;
+
+                bcdec_bc7((const void*)((const char*)data + blockOffset), (void *)(pixels + pixelOffset), width * 4);
+            }
+        }
+    }
+
+    return pixels;
+}
+
+static void macdrv_glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat,
+                                          GLsizei width, GLsizei height, GLsizei depth, GLint border,
+                                          GLsizei imageSize, const void *data)
+{
+    if ((internalformat == GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB ||
+         internalformat == GL_COMPRESSED_RGBA_BPTC_UNORM_ARB) &&
+        (target == GL_TEXTURE_2D_ARRAY || target == GL_PROXY_TEXTURE_2D_ARRAY))
+    {
+        char *rawdata = decode_bptc_unorm_to_rgba(data, width, height, depth);
+        opengl_funcs.ext.p_glTexImage3D(target, level, (internalformat == GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB ? GL_SRGB8_ALPHA8 : GL_RGBA8), width, height, depth, border, GL_RGBA, GL_UNSIGNED_BYTE, rawdata);
+        if (rawdata)
+            free(rawdata);
+    }
+    else
+        pglCompressedTexImage3D(target, level, internalformat, width, height, depth, border, imageSize, data);
+}
+
+static void macdrv_glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                                             GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                                             GLenum format, GLsizei imageSize, const void *data)
+{
+    if ((format == GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB ||
+         format == GL_COMPRESSED_RGBA_BPTC_UNORM_ARB) &&
+        (target == GL_TEXTURE_2D_ARRAY || target == GL_PROXY_TEXTURE_2D_ARRAY))
+    {
+        char *pixels = decode_bptc_unorm_to_rgba(data, width, height, depth);
+        opengl_funcs.ext.p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        if (pixels)
+            free(pixels);
+    }
+    else
+        pglCompressedTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
+}
+
+/* CX HACK 23422 - END */
 
 static void register_extension(const char *ext)
 {
@@ -4260,6 +4376,10 @@ static void init_opengl(void)
 #define REDIRECT(func) \
     do { if ((p##func = dlsym(opengl_handle, #func))) { opengl_funcs.ext.p_##func = macdrv_##func; } } while(0)
     REDIRECT(glCopyColorTable);
+
+    /* CX HACK 23422 */
+    REDIRECT(glCompressedTexImage3D);
+    REDIRECT(glCompressedTexSubImage3D);
 #undef REDIRECT
 
     if (gluCheckExtension((GLubyte*)"GL_APPLE_flush_render", (GLubyte*)gl_info.glExtensions))
@@ -4323,6 +4443,7 @@ static int macdrv_wglDescribePixelFormat(HDC hdc, int fmt, UINT size, PIXELFORMA
     descr->dwFlags          = PFD_SUPPORT_OPENGL;
     if (pf->window)         descr->dwFlags |= PFD_DRAW_TO_WINDOW;
     if (!pf->accelerated)   descr->dwFlags |= PFD_GENERIC_FORMAT;
+    else                    descr->dwFlags |= PFD_SUPPORT_COMPOSITION;
     if (pf->double_buffer)  descr->dwFlags |= PFD_DOUBLEBUFFER;
     if (pf->stereo)         descr->dwFlags |= PFD_STEREO;
     if (pf->backing_store)  descr->dwFlags |= PFD_SWAP_COPY;
@@ -4417,8 +4538,12 @@ static BOOL macdrv_wglDeleteContext(struct wgl_context *context)
 static int macdrv_wglGetPixelFormat(HDC hdc)
 {
     int format;
+    HWND hwnd;
 
-    format = get_dc_pixel_format(hdc);
+    if ((hwnd = NtUserWindowFromDC( hdc )))
+        return win32u_get_window_pixel_format( hwnd );
+
+    format = get_dc_pixel_format(NULL, hdc);
 
     if (!is_valid_pixel_format(format))  /* not set yet */
         format = 0;

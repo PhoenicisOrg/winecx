@@ -187,7 +187,7 @@ CFStringRef copy_system_cursor_name(ICONINFOEXW *info)
     else
     {
         char buf[16];
-        sprintf(buf, "%hu", info->wResID);
+        snprintf(buf, sizeof(buf), "%hu", info->wResID);
         asciiz_to_unicode(p, buf);
     }
 
@@ -659,11 +659,13 @@ void macdrv_DestroyCursorIcon(HCURSOR cursor)
  *
  * Set the cursor clipping rectangle.
  */
-BOOL macdrv_ClipCursor(LPCRECT clip)
+BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset)
 {
     CGRect rect;
 
-    TRACE("%s\n", wine_dbgstr_rect(clip));
+    TRACE("%s %u\n", wine_dbgstr_rect(clip), reset);
+
+    if (reset) return TRUE;
 
     if (clip)
     {
@@ -742,12 +744,12 @@ static BOOL get_icon_info(HICON handle, ICONINFOEXW *ret)
 /***********************************************************************
  *              SetCursor (MACDRV.@)
  */
-void macdrv_SetCursor(HCURSOR cursor)
+void macdrv_SetCursor(HWND hwnd, HCURSOR cursor)
 {
     CFStringRef cursor_name = NULL;
     CFArrayRef cursor_frames = NULL;
 
-    TRACE("%p\n", cursor);
+    TRACE("%p %p\n", hwnd, cursor);
 
     if (cursor)
     {
@@ -855,18 +857,11 @@ void macdrv_mouse_button(HWND hwnd, const macdrv_event *event)
 {
     UINT flags = 0;
     WORD data = 0;
-    POINT pt;
 
     TRACE("win %p button %d %s at (%d,%d) time %lu (%lu ticks ago)\n", hwnd, event->mouse_button.button,
           (event->mouse_button.pressed ? "pressed" : "released"),
           event->mouse_button.x, event->mouse_button.y,
           event->mouse_button.time_ms, (NtGetTickCount() - event->mouse_button.time_ms));
-
-    /* CrossOver Hack #15388 */
-    pt.x = event->mouse_button.x;
-    pt.y = event->mouse_button.y;
-    if (quicken_signin_hack)
-        NtUserMapWindowPoints(hwnd, 0, &pt, 1);
 
     if (event->mouse_button.pressed)
     {
@@ -896,7 +891,7 @@ void macdrv_mouse_button(HWND hwnd, const macdrv_event *event)
     }
 
     send_mouse_input(hwnd, event->window, flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
-                     pt.x, pt.y,
+                     event->mouse_button.x, event->mouse_button.y,
                      data, FALSE, event->mouse_button.time_ms);
 }
 
@@ -909,26 +904,16 @@ void macdrv_mouse_button(HWND hwnd, const macdrv_event *event)
 void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event)
 {
     UINT flags = MOUSEEVENTF_MOVE;
-    POINT pt;
 
     TRACE("win %p/%p %s (%d,%d) drag %d time %lu (%lu ticks ago)\n", hwnd, event->window,
           (event->type == MOUSE_MOVED_RELATIVE) ? "relative" : "absolute",
           event->mouse_moved.x, event->mouse_moved.y, event->mouse_moved.drag,
           event->mouse_moved.time_ms, (NtGetTickCount() - event->mouse_moved.time_ms));
 
-    pt.x = event->mouse_moved.x;
-    pt.y = event->mouse_moved.y;
-
     if (event->type == MOUSE_MOVED_ABSOLUTE)
-    {
         flags |= MOUSEEVENTF_ABSOLUTE;
 
-        /* CrossOver Hack #15388 */
-        if (quicken_signin_hack)
-            NtUserMapWindowPoints(hwnd, 0, &pt, 1);
-    }
-
-    send_mouse_input(hwnd, event->window, flags, pt.x, pt.y,
+    send_mouse_input(hwnd, event->window, flags, event->mouse_moved.x, event->mouse_moved.y,
                      0, event->mouse_moved.drag, event->mouse_moved.time_ms);
 }
 

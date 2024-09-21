@@ -33,6 +33,7 @@
 #import "cocoa_event.h"
 #import "cocoa_opengl.h"
 
+#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
 #if !defined(MAC_OS_X_VERSION_10_12) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12
 /* Additional Mac virtual keycode, to complement those in Carbon's <HIToolbox/Events.h>. */
@@ -158,6 +159,21 @@ static inline NSUInteger adjusted_modifiers_for_settings(NSUInteger modifiers)
 
     fix_generic_modifiers_by_device(&new_modifiers);
     return new_modifiers;
+}
+
+static inline BOOL stage_manager_enabled(void)
+{
+    /* There is no documented way to determine if Stage Manager is enabled,
+     * but this seems like the best option.
+     */
+    if (floor(NSAppKitVersionNumber) >= 2299 /* NSAppKitVersionNumber13_0 */)
+    {
+        NSUserDefaults *defs = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.WindowManager.plist"];
+        BOOL enabled = [defs boolForKey:@"GloballyEnabled"];
+        [defs release];
+        return enabled;
+    }
+    return FALSE;
 }
 
 
@@ -402,7 +418,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 @property (nonatomic) CGFloat colorKeyRed, colorKeyGreen, colorKeyBlue;
 @property (nonatomic) BOOL usePerPixelAlpha;
 
-@property (assign, nonatomic) void* imeData;
+@property (assign, nonatomic) void* himc;
 @property (nonatomic) BOOL commandDone;
 
 @property (readonly, copy, nonatomic) NSArray* childWineWindows;
@@ -758,7 +774,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         WineWindow* window = (WineWindow*)[self window];
 
         event = macdrv_create_event(IM_SET_TEXT, window);
-        event->im_set_text.data = [window imeData];
+        event->im_set_text.himc = [window himc];
         event->im_set_text.text = (CFStringRef)[text copy];
         event->im_set_text.complete = TRUE;
 
@@ -841,7 +857,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
             markedTextSelection.location += replacementRange.location;
 
             event = macdrv_create_event(IM_SET_TEXT, window);
-            event->im_set_text.data = [window imeData];
+            event->im_set_text.himc = [window himc];
             event->im_set_text.text = (CFStringRef)[[markedText string] copy];
             event->im_set_text.complete = FALSE;
             event->im_set_text.cursor_pos = markedTextSelection.location + markedTextSelection.length;
@@ -904,7 +920,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         query = macdrv_create_query();
         query->type = QUERY_IME_CHAR_RECT;
         query->window = (macdrv_window)[window retain];
-        query->ime_char_rect.data = [window imeData];
+        query->ime_char_rect.himc = [window himc];
         query->ime_char_rect.range = CFRangeMake(aRange.location, aRange.length);
 
         if ([window.queue query:query timeout:0.3 flags:WineQueryNoPreemptWait])
@@ -991,7 +1007,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     @synthesize shapeChangedSinceLastDraw;
     @synthesize colorKeyed, colorKeyRed, colorKeyGreen, colorKeyBlue;
     @synthesize usePerPixelAlpha;
-    @synthesize imeData, commandDone;
+    @synthesize himc, commandDone;
 
     + (WineWindow*) createWindowWithFeatures:(const struct macdrv_window_features*)wf
                                  windowFrame:(NSRect)window_frame
@@ -1032,9 +1048,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         window->resizable = wf->resizable;
         window->_lastDisplayTime = [[NSDate distantPast] timeIntervalSinceReferenceDate];
 
-        [window registerForDraggedTypes:[NSArray arrayWithObjects:(NSString*)kUTTypeData,
-                                                                  (NSString*)kUTTypeContent,
-                                                                  nil]];
+        [window registerForDraggedTypes:@[(NSString*)kUTTypeData, (NSString*)kUTTypeContent]];
 
         contentView = [[[WineContentView alloc] initWithFrame:NSZeroRect] autorelease];
         if (!contentView)
@@ -1326,10 +1340,20 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
             {
                 if ([self wouldBeVisible])
                 {
-                    if ([self styleMask] & NSWindowStyleMaskFullScreen)
+                    if (([self styleMask] & NSWindowStyleMaskFullScreen) || stage_manager_enabled())
                     {
                         [self postDidUnminimizeEvent];
                         discard &= ~event_mask_for_type(WINDOW_DID_UNMINIMIZE);
+
+                        /* When Stage Manager is enabled, it's not possible to minimize the window
+                         * (miniaturize: just moves the window to the background).
+                         * Post an unminimize event, then miniaturize:.
+                         */
+                        if (stage_manager_enabled())
+                        {
+                            [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+                            [super miniaturize:nil];
+                        }
                     }
                     else
                     {
@@ -1437,7 +1461,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         limit = MIN(origChildren.count, count);
         for (start = 0; start < limit; start++)
         {
-            if ([origChildren objectAtIndex:start] != [childWindows objectAtIndex:start])
+            if (origChildren[start] != childWindows[start])
                 break;
         }
 
@@ -1445,12 +1469,12 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         // are in the desired order.
         for (i = start; i < count; i++)
         {
-            WineWindow* child = [childWindows objectAtIndex:i];
+            WineWindow* child = childWindows[i];
             [self removeChildWindow:child];
         }
         for (i = start; i < count; i++)
         {
-            WineWindow* child = [childWindows objectAtIndex:i];
+            WineWindow* child = childWindows[i];
             [self addChildWindow:child ordered:NSWindowAbove];
         }
     }
@@ -1507,7 +1531,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
             for (i = 0; i < count; i++)
             {
-                WineWindow* child = [latentChildWindows objectAtIndex:i];
+                WineWindow* child = latentChildWindows[i];
                 if ([child isVisible] && (self.floating || !child.floating))
                 {
                     if (child.latentParentWindow == self)
@@ -1612,7 +1636,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
         for (i = lowIndex + 1; i < highIndex; i++)
         {
-            NSInteger interveningWindowNumber = [[windowNumbers objectAtIndex:i] integerValue];
+            NSInteger interveningWindowNumber = [windowNumbers[i] integerValue];
             NSWindow* interveningWindow = [NSApp windowWithWindowNumber:interveningWindowNumber];
             if ([interveningWindow isKindOfClass:[WineWindow class]])
                 return FALSE;
@@ -1693,7 +1717,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                 if (index == 0)
                     *ancestorOfOther = nil;
                 else
-                    *ancestorOfOther = [otherAncestors objectAtIndex:index - 1];
+                    *ancestorOfOther = otherAncestors[index - 1];
                 return;
             }
         }
@@ -1882,10 +1906,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                                          event_mask_for_type(WINDOW_MINIMIZE_REQUESTED) |
                                          event_mask_for_type(WINDOW_RESTORE_REQUESTED)
                                forWindow:self];
-
-        /* CrossOver Hack #15388 */
-        if (quicken_signin_hack && ![controller frontWineWindow])
-            [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     }
 
     - (void) updateFullscreen
@@ -2238,8 +2258,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         if (!_lastDisplayID)
             return nil;
 
-        NSMutableDictionary* displayIDToDisplayLinkMap = [self displayIDToDisplayLinkMap];
-        return [displayIDToDisplayLinkMap objectForKey:[NSNumber numberWithUnsignedInt:_lastDisplayID]];
+        return [self displayIDToDisplayLinkMap][@(_lastDisplayID)];
     }
 
     - (void) checkWineDisplayLink
@@ -2252,7 +2271,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
             screen = nil;
 #endif
 
-        NSNumber* displayIDNumber = [screen.deviceDescription objectForKey:@"NSScreenNumber"];
+        NSNumber* displayIDNumber = screen.deviceDescription[@"NSScreenNumber"];
         CGDirectDisplayID displayID = [displayIDNumber unsignedIntValue];
         if (displayID == _lastDisplayID)
             return;
@@ -2261,12 +2280,12 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
         if (_lastDisplayID)
         {
-            WineDisplayLink* link = [displayIDToDisplayLinkMap objectForKey:[NSNumber numberWithUnsignedInt:_lastDisplayID]];
+            WineDisplayLink* link = displayIDToDisplayLinkMap[@(_lastDisplayID)];
             [link removeWindow:self];
         }
         if (displayID)
         {
-            WineDisplayLink* link = [displayIDToDisplayLinkMap objectForKey:displayIDNumber];
+            WineDisplayLink* link = displayIDToDisplayLinkMap[displayIDNumber];
             if (!link)
             {
                 link = [[[WineDisplayLink alloc] initWithDisplayID:displayID] autorelease];
@@ -2394,7 +2413,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
      */
     - (BOOL) canBecomeKeyWindow
     {
-        if (quicken_signin_hack) return YES; /* CrossOver Hack #15388 */
         if (causing_becomeKeyWindow == self) return YES;
         if (self.disabled || self.noForeground) return NO;
         if ([self isKeyWindow]) return YES;
@@ -2648,6 +2666,16 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
     - (void) miniaturize:(id)sender
     {
+        /* When Stage Manager is enabled, miniaturize: just moves the app/window to
+         * the background rather than minimizing the window.
+         * Don't start minimizing the window on the Win32 side.
+         */
+        if (stage_manager_enabled())
+        {
+            [super miniaturize:sender];
+            return;
+        }
+
         macdrv_event* event = macdrv_create_event(WINDOW_MINIMIZE_REQUESTED, self);
         [queue postEvent:event];
         macdrv_release_event(event);
@@ -3366,7 +3394,8 @@ macdrv_window macdrv_create_cocoa_window(const struct macdrv_window_features* wf
  */
 void macdrv_destroy_cocoa_window(macdrv_window w)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
@@ -3376,8 +3405,7 @@ void macdrv_destroy_cocoa_window(macdrv_window w)
     });
     [window.queue discardEventsMatchingMask:-1 forWindow:window];
     [window release];
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3429,7 +3457,8 @@ void macdrv_set_cocoa_window_state(macdrv_window w,
 void macdrv_set_cocoa_window_title(macdrv_window w, const unsigned short* title,
         size_t length)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
     NSString* titleString;
 
@@ -3442,8 +3471,7 @@ void macdrv_set_cocoa_window_title(macdrv_window w, const unsigned short* title,
         if ([window isOrderedIn] && ![window isExcludedFromWindowsMenu])
             [NSApp changeWindowsItem:window title:titleString filename:NO];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3538,15 +3566,15 @@ void macdrv_set_cocoa_parent_window(macdrv_window w, macdrv_window parent)
  */
 void macdrv_set_window_surface(macdrv_window w, void *surface, pthread_mutex_t *mutex)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
         window.surface = surface;
         window.surface_mutex = mutex;
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3557,14 +3585,14 @@ void macdrv_set_window_surface(macdrv_window w, void *surface, pthread_mutex_t *
  */
 void macdrv_window_needs_display(macdrv_window w, CGRect rect)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThreadAsync(^{
         [[window contentView] setNeedsDisplayInRect:NSRectFromCGRect(cgrect_mac_from_win(rect))];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3575,7 +3603,8 @@ void macdrv_window_needs_display(macdrv_window w, CGRect rect)
  */
 void macdrv_set_window_shape(macdrv_window w, const CGRect *rects, int count)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
@@ -3596,8 +3625,7 @@ void macdrv_set_window_shape(macdrv_window w, const CGRect *rects, int count)
             CGPathRelease(path);
         }
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3605,12 +3633,12 @@ void macdrv_set_window_shape(macdrv_window w, const CGRect *rects, int count)
  */
 void macdrv_set_window_alpha(macdrv_window w, CGFloat alpha)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     [window setAlphaValue:alpha];
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3619,7 +3647,8 @@ void macdrv_set_window_alpha(macdrv_window w, CGFloat alpha)
 void macdrv_set_window_color_key(macdrv_window w, CGFloat keyRed, CGFloat keyGreen,
                                  CGFloat keyBlue)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
@@ -3629,8 +3658,7 @@ void macdrv_set_window_color_key(macdrv_window w, CGFloat keyRed, CGFloat keyGre
         window.colorKeyBlue     = keyBlue;
         [window checkTransparency];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3638,15 +3666,15 @@ void macdrv_set_window_color_key(macdrv_window w, CGFloat keyRed, CGFloat keyGre
  */
 void macdrv_clear_window_color_key(macdrv_window w)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
         window.colorKeyed = FALSE;
         [window checkTransparency];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3654,15 +3682,15 @@ void macdrv_clear_window_color_key(macdrv_window w)
  */
 void macdrv_window_use_per_pixel_alpha(macdrv_window w, int use_per_pixel_alpha)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineWindow* window = (WineWindow*)w;
 
     OnMainThread(^{
         window.usePerPixelAlpha = use_per_pixel_alpha;
         [window checkTransparency];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3704,7 +3732,8 @@ void macdrv_set_window_min_max_sizes(macdrv_window w, CGSize min_size, CGSize ma
  */
 macdrv_view macdrv_create_view(CGRect rect)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     __block WineContentView* view;
 
     if (CGRectIsNull(rect)) rect = CGRectZero;
@@ -3726,8 +3755,8 @@ macdrv_view macdrv_create_view(CGRect rect)
                  object:NSApp];
     });
 
-    [pool release];
     return (macdrv_view)view;
+}
 }
 
 /***********************************************************************
@@ -3737,7 +3766,8 @@ macdrv_view macdrv_create_view(CGRect rect)
  */
 void macdrv_dispose_view(macdrv_view v)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
 
     OnMainThread(^{
@@ -3754,8 +3784,7 @@ void macdrv_dispose_view(macdrv_view v)
         [view release];
         [window updateForGLSubviews];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3763,7 +3792,8 @@ void macdrv_dispose_view(macdrv_view v)
  */
 void macdrv_set_view_frame(macdrv_view v, CGRect rect)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
 
     if (CGRectIsNull(rect)) rect = CGRectZero;
@@ -3791,8 +3821,7 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
             [(WineWindow*)[view window] updateForGLSubviews];
         }
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3805,7 +3834,8 @@ void macdrv_set_view_frame(macdrv_view v, CGRect rect)
  */
 void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, macdrv_view p, macdrv_view n)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
     WineContentView* superview = (WineContentView*)s;
     WineWindow* window = (WineWindow*)w;
@@ -3822,9 +3852,9 @@ void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, ma
             NSUInteger index = [subviews indexOfObjectIdenticalTo:view];
             if (!prev && !next && index == [subviews count] - 1)
                 return;
-            if (prev && index + 1 < [subviews count] && [subviews objectAtIndex:index + 1] == prev)
+            if (prev && index + 1 < [subviews count] && subviews[index + 1] == prev)
                 return;
-            if (!prev && next && index > 0 && [subviews objectAtIndex:index - 1] == next)
+            if (!prev && next && index > 0 && subviews[index - 1] == next)
                 return;
         }
 
@@ -3846,8 +3876,7 @@ void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, ma
             [newWindow updateForGLSubviews];
         }
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3855,15 +3884,15 @@ void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, ma
  */
 void macdrv_set_view_hidden(macdrv_view v, int hidden)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
 
     OnMainThreadAsync(^{
         [view setHidden:hidden];
         [(WineWindow*)view.window updateForGLSubviews];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3873,15 +3902,15 @@ void macdrv_set_view_hidden(macdrv_view v, int hidden)
  */
 void macdrv_add_view_opengl_context(macdrv_view v, macdrv_opengl_context c)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
     WineOpenGLContext *context = (WineOpenGLContext*)c;
 
     OnMainThread(^{
         [view addGLContext:context];
     });
-
-    [pool release];
+}
 }
 
 /***********************************************************************
@@ -3891,18 +3920,20 @@ void macdrv_add_view_opengl_context(macdrv_view v, macdrv_opengl_context c)
  */
 void macdrv_remove_view_opengl_context(macdrv_view v, macdrv_opengl_context c)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     WineContentView* view = (WineContentView*)v;
     WineOpenGLContext *context = (WineOpenGLContext*)c;
 
     OnMainThreadAsync(^{
         [view removeGLContext:context];
     });
-
-    [pool release];
+}
 }
 
 macdrv_metal_device macdrv_create_metal_device(void)
+{
+@autoreleasepool
 {
     macdrv_metal_device ret;
 
@@ -3911,17 +3942,17 @@ macdrv_metal_device macdrv_create_metal_device(void)
         return NULL;
 #endif
 
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
     ret = (macdrv_metal_device)MTLCreateSystemDefaultDevice();
-    [pool release];
     return ret;
+}
 }
 
 void macdrv_release_metal_device(macdrv_metal_device d)
 {
-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+@autoreleasepool
+{
     [(id<MTLDevice>)d release];
-    [pool release];
+}
 }
 
 macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d)
@@ -4022,7 +4053,7 @@ uint32_t macdrv_window_background_color(void)
 /***********************************************************************
  *              macdrv_send_text_input_event
  */
-void macdrv_send_text_input_event(int pressed, unsigned int flags, int repeat, int keyc, void* data, int* done)
+void macdrv_send_text_input_event(int pressed, unsigned int flags, int repeat, int keyc, void* himc, int* done)
 {
     OnMainThreadAsync(^{
         BOOL ret;
@@ -4041,7 +4072,7 @@ void macdrv_send_text_input_event(int pressed, unsigned int flags, int repeat, i
             CGEventRef c;
             NSEvent* event;
 
-            window.imeData = data;
+            window.himc = himc;
             fix_device_modifiers_by_generic(&localFlags);
 
             // An NSEvent created with +keyEventWithType:... is internally marked
@@ -4079,16 +4110,5 @@ void macdrv_clear_ime_text(void)
         }
         if (window)
             [[window contentView] clearMarkedText];
-    });
-}
-
-/* CX HACK 16565 */
-void macdrv_force_popup_order_front(macdrv_window w)
-{
-    WineWindow* window = (WineWindow*)w;
-
-    OnMainThread(^{
-        window.level = NSPopUpMenuWindowLevel;
-        [window orderFrontRegardless];
     });
 }

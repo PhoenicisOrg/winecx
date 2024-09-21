@@ -72,6 +72,7 @@ static const struct object_ops symlink_ops =
     NULL,                         /* remove_queue */
     NULL,                         /* signaled */
     NULL,                         /* get_esync_fd */
+    NULL,                         /* get_msync_idx */
     NULL,                         /* satisfied */
     no_signal,                    /* signal */
     no_get_fd,                    /* get_fd */
@@ -156,13 +157,18 @@ struct object *create_symlink( struct object *root, const struct unicode_str *na
         set_error( STATUS_INVALID_PARAMETER );
         return NULL;
     }
-    if (!(symlink = create_named_object( root, &symlink_ops, name, attr, sd ))) return NULL;
-    if (get_error() != STATUS_OBJECT_NAME_EXISTS && !(symlink->target = memdup( target->str, target->len )))
+    if (!(symlink = create_named_object( root, &symlink_ops, name, attr | OBJ_OPENLINK, sd ))) return NULL;
+    if (get_error() != STATUS_OBJECT_NAME_EXISTS)
     {
-        release_object( symlink );
-        return NULL;
+        symlink->len = target->len;
+        if (!(symlink->target = memdup( target->str, target->len )))
+        {
+            release_object( symlink );
+            return NULL;
+        }
     }
-    symlink->len = target->len;
+    else clear_error();
+
     return &symlink->obj;
 }
 

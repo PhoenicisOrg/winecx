@@ -64,6 +64,7 @@
 #include "user.h"
 #include "security.h"
 #include "esync.h"
+#include "msync.h"
 
 /* process object */
 
@@ -97,6 +98,7 @@ static void process_poll_event( struct fd *fd, int event );
 static struct list *process_get_kernel_obj_list( struct object *obj );
 static void process_destroy( struct object *obj );
 static struct esync_fd *process_get_esync_fd( struct object *obj, enum esync_type *type );
+static unsigned int process_get_msync_idx( struct object *obj, enum msync_type *type );
 static void terminate_process( struct process *process, struct thread *skip, int exit_code );
 
 static const struct object_ops process_ops =
@@ -108,6 +110,7 @@ static const struct object_ops process_ops =
     remove_queue,                /* remove_queue */
     process_signaled,            /* signaled */
     process_get_esync_fd,        /* get_esync_fd */
+    process_get_msync_idx,       /* get_msync_idx */
     no_satisfied,                /* satisfied */
     no_signal,                   /* signal */
     no_get_fd,                   /* get_fd */
@@ -160,6 +163,7 @@ static const struct object_ops startup_info_ops =
     remove_queue,                  /* remove_queue */
     startup_info_signaled,         /* signaled */
     NULL,                          /* get_esync_fd */
+    NULL,                          /* get_msync_idx */
     no_satisfied,                  /* satisfied */
     no_signal,                     /* signal */
     no_get_fd,                     /* get_fd */
@@ -222,6 +226,7 @@ static const struct object_ops job_ops =
     remove_queue,                  /* remove_queue */
     job_signaled,                  /* signaled */
     NULL,                          /* get_esync_fd */
+    NULL,                          /* get_msync_idx */
     no_satisfied,                  /* satisfied */
     no_signal,                     /* signal */
     no_get_fd,                     /* get_fd */
@@ -844,12 +849,12 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->rawinput_kbd    = NULL;
     memset( &process->image_info, 0, sizeof(process->image_info) );
     process->esync_fd        = NULL;
+    process->msync_idx       = 0;
     list_init( &process->kernel_object );
     list_init( &process->thread_list );
     list_init( &process->locks );
     list_init( &process->asyncs );
     list_init( &process->classes );
-    list_init( &process->surfaces );
     list_init( &process->views );
 
     process->end_time = 0;
@@ -900,6 +905,9 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
      * makes more sense for the time being. */
     if (!token_assign_label( process->token, &high_label_sid ))
         goto error;
+
+    if (do_msync())
+        process->msync_idx = msync_alloc_shm( 0, 0 );
 
     if (do_esync())
         process->esync_fd = esync_create_fd( 0, 0 );
@@ -952,6 +960,7 @@ static void process_destroy( struct object *obj )
     free( process->dir_cache );
     free( process->image );
     if (do_esync()) esync_close_fd( process->esync_fd );
+    if (do_msync()) msync_destroy_semaphore( process->msync_idx );
 }
 
 /* dump a process on stdout for debugging purposes */
@@ -974,6 +983,13 @@ static struct esync_fd *process_get_esync_fd( struct object *obj, enum esync_typ
     struct process *process = (struct process *)obj;
     *type = ESYNC_MANUAL_SERVER;
     return process->esync_fd;
+}
+
+static unsigned int process_get_msync_idx( struct object *obj, enum msync_type *type )
+{
+    struct process *process = (struct process *)obj;
+    *type = MSYNC_MANUAL_SERVER;
+    return process->msync_idx;
 }
 
 static unsigned int process_map_access( struct object *obj, unsigned int access )
@@ -1151,7 +1167,6 @@ static void process_killed( struct process *process )
     destroy_process_classes( process );
     free_mapped_views( process );
     free_process_user_handles( process );
-    remove_process_surfaces( process );
     remove_process_locks( process );
     set_process_startup_state( process, STARTUP_ABORTED );
     finish_process_tracing( process );
@@ -1473,6 +1488,7 @@ DECL_HANDLER(new_process)
                                     handles, req->handles_size / sizeof(*handles), token )))
         goto done;
 
+    process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
 
     job = parent->job;
@@ -1534,7 +1550,10 @@ DECL_HANDLER(new_process)
         /* debug_children is set to 1 by default */
     }
 
-    if (!info->data->console_flags) process->group_id = parent->group_id;
+    if (info->data->process_group_id == parent->group_id)
+        process->group_id = parent->group_id;
+    else
+        info->data->process_group_id = process->group_id;
 
     info->process = (struct process *)grab_object( process );
     reply->info = alloc_handle( current->process, info, SYNCHRONIZE, 0 );
@@ -1573,6 +1592,7 @@ DECL_HANDLER(get_startup_info)
     if (!info) return;
 
     /* we return the data directly without making a copy so this can only be called once */
+    reply->machine = process->machine;
     reply->info_size = info->info_size;
     size = info->data_size;
     if (size > get_reply_max_size()) size = get_reply_max_size();

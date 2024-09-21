@@ -2,12 +2,12 @@
 
 .wine-test:
   stage: test
-  image: $CI_REGISTRY/wine/wine:debian-bullseye
+  image: $CI_REGISTRY/wine/wine:debian-bookworm
   interruptible: true
   variables:
     GIT_STRATEGY: none
-    GECKO_VER: 2.47.3
-    MONO_VER: 7.4.0
+    GECKO_VER: 2.47.4
+    MONO_VER: 8.1.0
   cache:
     - key: wine-gecko-$GECKO_VER
       paths:
@@ -21,6 +21,7 @@
     - export PATH=$BASEDIR/usr/local/bin:$PATH
     - export DISPLAY=:0
     - export LC_ALL=C.UTF-8
+    - export LP_NUM_THREADS=4
     - export WINEDEBUG=err-all,fixme-all
     - |
       cat >$HOME/xorg.conf << EOF
@@ -30,7 +31,7 @@
         VideoRam 32768
       EndSection
       EOF
-    - echo 'exec /usr/bin/fvwm -f config -c "Style * MwmDecor" 2>/dev/null' >$HOME/.xinitrc
+    - echo 'exec /usr/bin/fvwm -f config -c "Style * MwmDecor" -c "Style * UsePPosition" 2>/dev/null' >$HOME/.xinitrc
     - startx -- -config $HOME/xorg.conf $DISPLAY &
     - test -f wine-gecko-$GECKO_VER-x86.msi || curl -o wine-gecko-$GECKO_VER-x86.msi https://dl.winehq.org/wine/wine-gecko/$GECKO_VER/wine-gecko-$GECKO_VER-x86.msi
     - test -f wine-gecko-$GECKO_VER-x86_64.msi || curl -o wine-gecko-$GECKO_VER-x86_64.msi https://dl.winehq.org/wine/wine-gecko/$GECKO_VER/wine-gecko-$GECKO_VER-x86_64.msi
@@ -42,10 +43,22 @@
     - wine wineboot.exe -u
     - wineserver -w
 
+test-linux-64:
+  extends: .wine-test
+  variables:
+    INCLUDE_TESTS: "dinput"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  needs:
+    - job: build-linux
+  script:
+    - export WINETEST_COLOR=1
+    - wine usr/local/lib/wine/x86_64-windows/winetest.exe -q -q -o - -t gitlab -u $CI_JOB_URL $INCLUDE_TESTS
+
 test-linux-32:
   extends: .wine-test
   variables:
-    EXCLUDE_TESTS: "d3d10core:d3d10core d3d11:d3d11 d3d8:device d3d8:visual d3d9:d3d9ex d3d9:device d3d9:visual"
+    EXCLUDE_TESTS: "d3d11:d3d11 d3d9:d3d9ex d3d9:visual"
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
   needs:
@@ -53,6 +66,48 @@ test-linux-32:
   script:
     - export WINETEST_COLOR=1
     - wine usr/local/lib/wine/i386-windows/winetest.exe -q -q -o - -t gitlab -u $CI_JOB_URL -n $EXCLUDE_TESTS
+
+test-win10-21h2-32:
+  stage: test
+  interruptible: true
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  needs:
+    - job: build-winetest
+  tags:
+    - win10-21h2
+  script:
+    - $WINETEST_ARGS = @(Get-Content ./winetest.args)
+    - if ($WINETEST_ARGS.count -gt 0) { ./winetest.exe -q -q -o - -t gitlab -u $CI_JOB_URL @WINETEST_ARGS >winetest.log } else { echo $null >winetest.log }
+  after_script:
+    - Get-Content ./winetest.log
+  artifacts:
+    when: always
+    paths:
+      - winetest.log
+
+test-win10-21h2-64:
+  stage: test
+  interruptible: true
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  needs:
+    - job: build-winetest
+  tags:
+    - win10-21h2
+  script:
+    - $WINETEST_ARGS = @(Get-Content ./winetest.args)
+    - if ($WINETEST_ARGS.count -gt 0) { ./winetest64.exe -q -q -o - -t gitlab -u $CI_JOB_URL @WINETEST_ARGS >winetest.log } else { echo $null >winetest.log }
+  after_script:
+    - Get-Content ./winetest.log
+  artifacts:
+    when: always
+    paths:
+      - winetest.log
 
 debian-32:
   extends: .wine-test
@@ -80,7 +135,7 @@ win10-21h2-32:
   rules:
     - if: $CI_PIPELINE_SOURCE == 'trigger' && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   needs:
-    - job: build-winetest
+    - job: build-daily-winetest
   tags:
     - win10-21h2
   script:
@@ -94,7 +149,7 @@ win10-21h2-64:
   rules:
     - if: $CI_PIPELINE_SOURCE == 'trigger' && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   needs:
-    - job: build-winetest
+    - job: build-daily-winetest
   tags:
     - win10-21h2
   script:

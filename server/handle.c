@@ -127,6 +127,7 @@ static const struct object_ops handle_table_ops =
     NULL,                            /* remove_queue */
     NULL,                            /* signaled */
     NULL,                            /* get_esync_fd */
+    NULL,                            /* get_msync_idx */
     NULL,                            /* satisfied */
     no_signal,                       /* signal */
     no_get_fd,                       /* get_fd */
@@ -519,6 +520,21 @@ obj_handle_t find_inherited_handle( struct process *process, const struct object
         if (ptr->access & RESERVED_INHERIT) return index_to_handle(i);
     }
     return 0;
+}
+
+/* return number of open handles to the object in the process */
+unsigned int get_obj_handle_count( struct process *process, const struct object *obj )
+{
+    struct handle_table *table = process->handles;
+    struct handle_entry *ptr;
+    unsigned int count = 0;
+    int i;
+
+    if (!table) return 0;
+
+    for (i = 0, ptr = table->entries; i <= table->last; i++, ptr++)
+        if (ptr->ptr == obj) ++count;
+    return count;
 }
 
 /* get/set the handle reserved flags */

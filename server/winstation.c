@@ -30,6 +30,7 @@
 #include "winbase.h"
 #include "winuser.h"
 #include "winternl.h"
+#include "ntuser.h"
 
 #include "object.h"
 #include "handle.h"
@@ -76,6 +77,7 @@ static const struct object_ops winstation_ops =
     NULL,                         /* remove_queue */
     NULL,                         /* signaled */
     NULL,                         /* get_esync_fd */
+    NULL,                         /* get_msync_idx */
     NULL,                         /* satisfied */
     no_signal,                    /* signal */
     no_get_fd,                    /* get_fd */
@@ -117,6 +119,7 @@ static const struct object_ops desktop_ops =
     NULL,                         /* remove_queue */
     NULL,                         /* signaled */
     NULL,                         /* get_esync_fd */
+    NULL,                         /* get_msync_idx */
     NULL,                         /* satisfied */
     no_signal,                    /* signal */
     no_get_fd,                    /* get_fd */
@@ -242,7 +245,11 @@ static struct desktop *create_desktop( const struct unicode_str *name, unsigned 
             list_add_tail( &winstation->desktops, &desktop->entry );
             list_init( &desktop->hotkeys );
         }
-        else clear_error();
+        else
+        {
+            desktop->flags |= (flags & DF_WINE_CREATE_DESKTOP);
+            clear_error();
+        }
     }
     return desktop;
 }
