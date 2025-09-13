@@ -2677,10 +2677,9 @@ BOOL WINAPI CreateProcessWithLogonW( LPCWSTR lpUsername, LPCWSTR lpDomain, LPCWS
     LPCWSTR lpApplicationName, LPWSTR lpCommandLine, DWORD dwCreationFlags, LPVOID lpEnvironment,
     LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation )
 {
-    FIXME("%s %s %s 0x%08lx %s %s 0x%08lx %p %s %p %p stub\n", debugstr_w(lpUsername), debugstr_w(lpDomain),
-    debugstr_w(lpPassword), dwLogonFlags, debugstr_w(lpApplicationName),
-    debugstr_w(lpCommandLine), dwCreationFlags, lpEnvironment, debugstr_w(lpCurrentDirectory),
-    lpStartupInfo, lpProcessInformation);
+    FIXME("%s %s %p 0x%08lx %s %s 0x%08lx %p %s %p %p stub\n", debugstr_w(lpUsername), debugstr_w(lpDomain),
+          lpPassword, dwLogonFlags, debugstr_w(lpApplicationName), debugstr_w(lpCommandLine), dwCreationFlags,
+          lpEnvironment, debugstr_w(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
     return FALSE;
 }
@@ -2695,8 +2694,8 @@ BOOL WINAPI CreateProcessWithTokenW(HANDLE token, DWORD logon_flags, LPCWSTR app
           startup_info, process_information);
 
     /* FIXME: check if handles should be inherited */
-    return CreateProcessW( application_name, command_line, NULL, NULL, FALSE, creation_flags, environment,
-                           current_directory, startup_info, process_information );
+    return CreateProcessAsUserW( token, application_name, command_line, NULL, NULL, FALSE, creation_flags,
+                                 environment, current_directory, startup_info, process_information );
 }
 
 /******************************************************************************
@@ -3271,6 +3270,19 @@ BOOL WINAPI SaferCloseLevel(SAFER_LEVEL_HANDLE handle)
 {
     FIXME("(%p) stub\n", handle);
     return TRUE;
+}
+
+/******************************************************************************
+ * TreeSetNamedSecurityInfoW   [ADVAPI32.@]
+ */
+DWORD WINAPI TreeSetNamedSecurityInfoW(WCHAR *name, SE_OBJECT_TYPE type, SECURITY_INFORMATION info,
+                                       SID *owner, SID *group, ACL *dacl, ACL *sacl, DWORD action,
+                                       FN_PROGRESS progress, PROG_INVOKE_SETTING pis, void *args)
+{
+    FIXME("(%s, %d, %lu, %p, %p, %p, %p, %lu, %p, %d, %p) stub\n",
+          debugstr_w(name), type, info, owner, group, dacl, sacl, action, progress, pis, args);
+
+    return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
 /******************************************************************************

@@ -6,10 +6,11 @@ echo "---"
 set -Eeuxo pipefail
 
 ./tools/make_requests
+./tools/make_specfiles
 ./tools/make_makefiles
 autoreconf -f
 
 cd build64
-../configure -q -C --enable-archs=i386,x86_64,aarch64 --with-mingw=clang
-make -s -j$(nproc)
+../configure -q -C --enable-werror --enable-archs=i386,x86_64,aarch64 --with-mingw=clang
+make -s
 cd ..
